@@ -1,8 +1,12 @@
 module Main (main) where
 
+import Test.Engine qualified
 import Test.Hspec
-import Test.Kengine qualified
+import Test.Mapping qualified
+import Test.Types qualified
 
 main :: IO ()
 main = hspec $ parallel $ do
-  Test.Kengine.spec
+  Test.Types.spec
+  Test.Mapping.spec
+  Test.Engine.spec

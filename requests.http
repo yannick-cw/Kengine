@@ -1,0 +1,71 @@
+### Create index
+PUT http://localhost:3333/indexes/products
+Content-Type: application/json
+
+{
+  "fields": [
+    {"fieldName": "title", "sType": "Text"},
+    {"fieldName": "category", "sType": "Keyword"},
+    {"fieldName": "organic", "sType": "Bool"},
+    {"fieldName": "price", "sType": "Number"}
+  ]
+}
+
+### Index a document
+POST http://localhost:3333/indexes/products/documents
+Content-Type: application/json
+
+{
+  "title": "Bio Milch 1.5%",
+  "category": "dairy",
+  "organic": true,
+  "price": 1.29
+}
+
+### Index another document
+POST http://localhost:3333/indexes/products/documents
+Content-Type: application/json
+
+{
+  "title": "Haferflocken Bio",
+  "category": "cereals",
+  "organic": true,
+  "price": 1.99
+}
+
+### Search
+GET http://localhost:3333/indexes/products/search?q=milch
+
+### Search multi-term
+GET http://localhost:3333/indexes/products/search?q=bio milch
+
+### Create duplicate index (should fail)
+PUT http://localhost:3333/indexes/products
+Content-Type: application/json
+
+{
+  "fields": [
+    {"fieldName": "title", "sType": "Text"}
+  ]
+}
+
+### Invalid index name (should fail)
+PUT http://localhost:3333/indexes/!!!invalid
+Content-Type: application/json
+
+{
+  "fields": [
+    {"fieldName": "title", "sType": "Text"}
+  ]
+}
+
+### Duplicate field names (should fail)
+PUT http://localhost:3333/indexes/test
+Content-Type: application/json
+
+{
+  "fields": [
+    {"fieldName": "title", "sType": "Text"},
+    {"fieldName": "title", "sType": "Keyword"}
+  ]
+}

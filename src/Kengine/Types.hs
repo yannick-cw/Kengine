@@ -8,6 +8,7 @@ module Kengine.Types (
   IndexResponseStatus (..),
   SearchResults (..),
   ValidName,
+  Term (..),
 ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..))
@@ -71,3 +72,7 @@ instance ToJSON IndexResponse
 newtype SearchResults = SearchResults {results :: [Text]}
   deriving stock (Generic, Eq, Show)
 instance ToJSON SearchResults
+
+-- Document Types
+
+newtype Term = Term Text

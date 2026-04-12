@@ -78,8 +78,10 @@ library
 
     -- Modules exported by the library.
     exposed-modules:  Server
-                    , Kengine
                     , Kengine.Types
+                    , Kengine.Errors
+                    , Kengine.Mapping
+                    , Kengine.Engine
                     , Kengine.Store.InMemory
 
     -- Modules included in this library but not exported.
@@ -97,7 +99,9 @@ library
         bytestring,
         text,
         scotty,
-
+        transformers,
+        http-types,
+        validation-selective, 
     -- Directories containing source files.
     hs-source-dirs:   src
 
@@ -135,7 +139,10 @@ test-suite kengine-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Main.hs
-    other-modules:    Test.Kengine
+    other-modules:    Test.Types
+                    , Test.Mapping
+                    , Test.Engine
+                    , Test.Helpers.Generators
     build-depends:
         base ^>=4.21.0.0,
         kengine,
@@ -144,3 +151,5 @@ test-suite kengine-test
         hspec-hedgehog,
         aeson,
         text,
+        refined,
+        validation-selective, 
