@@ -12,7 +12,7 @@ import Kengine.Types (
   Mapping (..),
  )
 import Refined (unrefine)
-import Validation qualified as V (Validation (..), failureIf, validationToEither)
+import Validation qualified as V (Validation (..), failureIf)
 
 type Validated a = V.Validation (NE.NonEmpty Text) a
 

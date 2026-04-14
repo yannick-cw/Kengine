@@ -152,4 +152,5 @@ test-suite kengine-test
         aeson,
         text,
         refined,
+        containers,
         validation-selective, 

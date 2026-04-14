@@ -9,4 +9,5 @@ main :: IO ()
 main = hspec $ parallel $ do
   Test.Types.spec
   Test.Mapping.spec
-  Test.Engine.spec
+  Test.Engine.tokenizeSpec
+  Test.Engine.docSpec

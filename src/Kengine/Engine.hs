@@ -1,16 +1,21 @@
-module Kengine.Engine (tokenize, Token (..)) where
+module Kengine.Engine (parseDocument, tokenize, Token (..)) where
 
+import Data.Aeson qualified as AE
+import Data.Char qualified as C
 import Data.Text (Text)
 import Data.Text qualified as T
-import Kengine.Types (Term (..))
+import Kengine.Errors (IndexError (IndexError))
+import Kengine.Types (Document, Mapping, Term (..))
 
--- Implement as a pure function: `tokenize :: Text -> [Text]`
--- - Split on anything not alphanumeric (Unicode-aware)
--- - Lowercase all tokens
--- - Discard empty tokens
--- - "Bio-Milch 3,5%" becomes ["bio", "milch", "3", "5"]
+newtype Token = Token Text deriving newtype (Show, Eq)
 
-newtype Token = Token Text
-
+-- "Bio-Milch 3,5%" becomes ["bio", "milch", "3", "5"]
 tokenize :: Term -> [Token]
-tokenize (Term m) = [Token $ T.toLower m]
+tokenize = fmap (Token . T.toLower) . filter (not . T.null) . splitNonAlpha
+
+splitNonAlpha :: Term -> [Text]
+splitNonAlpha (Term t) = T.split (\tkn -> not (C.isAscii tkn && C.isAlphaNum tkn)) t
+
+-- todo implement this next
+parseDocument :: AE.Value -> Mapping -> Either IndexError Document
+parseDocument _ _ = Left $ IndexError "fail"

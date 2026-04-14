@@ -9,12 +9,17 @@ module Kengine.Types (
   SearchResults (..),
   ValidName,
   Term (..),
+  DocId (..),
+  Document (..),
+  FieldValue (..),
+  FieldName,
 ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..))
 import Data.Bifunctor (first)
 import Data.Char (isAlphaNum)
 import Data.List.NonEmpty qualified as L
+import Data.Map qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T (all, null)
 import Data.Text.Lazy qualified as LT
@@ -75,4 +80,9 @@ instance ToJSON SearchResults
 
 -- Document Types
 
+newtype DocId = DocId Text
 newtype Term = Term Text
+
+newtype Document = Document (Map.Map FieldName FieldValue) deriving newtype (Show, Eq)
+data FieldValue = TextVal Text | KeywordVal Text | BoolVal Bool | NumberVal Double
+  deriving stock (Show, Eq)

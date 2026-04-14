@@ -3,6 +3,7 @@ module Test.Helpers.Generators (
   genValidField,
   genValidFieldName,
   genValidIndexName,
+  genDocForMapping,
   validNameChar,
   genValidMappingJson,
   genValidFieldJson,
@@ -11,19 +12,30 @@ module Test.Helpers.Generators (
   genInvalidNameJson,
   genInvalidSTypeJson,
   genText,
-  genNonAlphaNum,
+  genNonAlphaText,
   genTextAlphaNum,
   genTokenizableText,
 ) where
 
 import Data.Aeson (Value, object, (.=))
 import Data.Char (isAlphaNum)
+import Data.List.NonEmpty qualified as NE
+import Data.Map qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Hedgehog (Gen)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import Kengine.Types (Field (..), IndexName, Mapping (..), SearchType (..), ValidName)
+import Kengine.Types (
+  Document (..),
+  Field (..),
+  FieldName,
+  FieldValue (..),
+  IndexName,
+  Mapping (..),
+  SearchType (..),
+  ValidName,
+ )
 import Refined (Refined, refine)
 
 -- type generators
@@ -61,7 +73,7 @@ genNonAlphaNum :: Gen Char
 genNonAlphaNum = Gen.filter (not . isAlphaNum) Gen.unicode
 
 genTextAlphaNum :: Gen Text
-genTextAlphaNum = Gen.text (Range.linear 0 10) Gen.alphaNum
+genTextAlphaNum = Gen.text (Range.linear 1 10) Gen.alphaNum
 
 genValidMappingJson :: Gen Value -> Gen Value
 genValidMappingJson fieldGen = do
@@ -95,10 +107,27 @@ genInvalidSTypeJson = do
   sType <- Gen.text (Range.linear 0 30) Gen.unicode
   pure $ object ["fieldName" .= name, "sType" .= sType]
 
+genDocForMapping :: Mapping -> Gen Document
+genDocForMapping (Mapping fields) = do
+  fieldValues <- traverse genFieldValue (NE.toList fields)
+  pure $ Document (Map.fromList fieldValues)
+
+genFieldValue :: Field -> Gen (FieldName, FieldValue)
+genFieldValue field = do
+  val <- case field.sType of
+    Text -> TextVal <$> genTextAlphaNum
+    Keyword -> KeywordVal <$> genValidName
+    Bool -> BoolVal <$> Gen.bool
+    Number -> NumberVal <$> Gen.double (Range.linearFrac 0 1000)
+  pure (field.fieldName, val)
+
+genNonAlphaText :: Gen Text
+genNonAlphaText = Gen.text (Range.linear 1 3) genNonAlphaNum
+
 genTokenizableText :: Gen [Text]
 genTokenizableText = do
   n <- Gen.int (Range.linear 1 10)
   tokens <- Gen.list (Range.singleton n) genTextAlphaNum
-  seps <- Gen.list (Range.singleton n) (Gen.text (Range.linear 1 3) genNonAlphaNum)
+  seps <- Gen.list (Range.singleton n) genNonAlphaText
   let tokensWithSep = uncurry (<>) <$> zip tokens seps
   pure tokensWithSep
