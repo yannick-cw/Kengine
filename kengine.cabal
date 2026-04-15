@@ -102,6 +102,7 @@ library
         transformers,
         http-types,
         validation-selective, 
+        scientific,
     -- Directories containing source files.
     hs-source-dirs:   src
 
@@ -154,3 +155,4 @@ test-suite kengine-test
         refined,
         containers,
         validation-selective, 
+        scientific,

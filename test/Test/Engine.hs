@@ -2,15 +2,29 @@ module Test.Engine (tokenizeSpec, docSpec) where
 
 import Data.Aeson qualified as AE
 import Data.Aeson.Key qualified as AE.Key
-import Data.Aeson.Types qualified as AE
 import Data.Char qualified as C
 import Data.Foldable (for_)
 import Data.List qualified as L
 import Data.Map qualified as Map
+import Data.Scientific qualified as S
 import Data.Text qualified as T
-import Hedgehog (Opaque (unOpaque), annotate, annotateShow, assert, diff, forAll)
+import Hedgehog (
+  annotate,
+  annotateShow,
+  assert,
+  diff,
+  failure,
+  forAll,
+ )
+import Hedgehog.Gen qualified as Gen
 import Kengine.Engine (Token (..), parseDocument, tokenize)
-import Kengine.Types (Document (Document), FieldValue, Term (..))
+import Kengine.Errors (IndexError (..))
+import Kengine.Types (
+  Document (Document),
+  FieldName,
+  FieldValue (BoolVal, KeywordVal, NumberVal, TextVal),
+  Term (..),
+ )
 import Refined (unrefine)
 import Test.Helpers.Generators (
   genDocForMapping,
@@ -54,13 +68,48 @@ docSpec = do
     it "accepts valid documents for a mapping" $ hedgehog $ do
       mapping <- forAll genValidMapping
       d@(Document doc) <- forAll $ genDocForMapping mapping
-      let jsonObj =
-            AE.object $
-              (\(name, fieldValue) -> (AE.Key.fromText $ unrefine name, fieldValToJSON fieldValue))
-                <$> Map.toList doc
+      let jsonObj = docToJson doc
       let validatedDoc = parseDocument jsonObj mapping
       annotateShow validatedDoc
       diff validatedDoc (==) (Right d)
+    it "rejects invalid docunents missing fields" $ hedgehog $ do
+      mapping <- forAll genValidMapping
+      (Document doc) <- forAll $ genDocForMapping mapping
+      toDropKeys <- forAll (Gen.filter (not . null) (Gen.subset (Map.keysSet doc)))
+      let missingFieldsDoc = Map.filterWithKey (\k _ -> k `notElem` toDropKeys) doc
+      let jsonObj = docToJson missingFieldsDoc
+      let validatedDoc = parseDocument jsonObj mapping
+      annotateShow validatedDoc
+      case validatedDoc of
+        Left (IndexError msg) ->
+          diff ("Missing required field" `T.isInfixOf` msg) (==) True
+        Right _ -> failure
+    it "rejects invalid docunents with wrong type" $ hedgehog $ do
+      mapping <- forAll genValidMapping
+      (Document doc) <- forAll $ genDocForMapping mapping
+      let docWithWrongTpe = fudgeFieldVal <$> doc
+      let jsonObj = docToJson docWithWrongTpe
+      let validatedDoc = parseDocument jsonObj mapping
+      annotateShow validatedDoc
+      case validatedDoc of
+        Left (IndexError msg) ->
+          diff ("Type: " `T.isInfixOf` msg) (==) True
+        Right _ -> failure
+
+docToJson :: Map.Map FieldName FieldValue -> AE.Value
+docToJson doc =
+  AE.object $
+    (\(name, fieldValue) -> (AE.Key.fromText $ unrefine name, fieldValToJSON fieldValue))
+      <$> Map.toList doc
 
 fieldValToJSON :: FieldValue -> AE.Value
-fieldValToJSON = undefined
+fieldValToJSON (TextVal txt) = AE.String txt
+fieldValToJSON (KeywordVal txt) = AE.String txt
+fieldValToJSON (BoolVal bool) = AE.Bool bool
+fieldValToJSON (NumberVal num) = AE.Number (S.fromFloatDigits num)
+
+fudgeFieldVal :: FieldValue -> FieldValue
+fudgeFieldVal (TextVal _) = BoolVal False
+fudgeFieldVal (KeywordVal _) = NumberVal 22
+fudgeFieldVal (BoolVal _) = TextVal "ello"
+fudgeFieldVal (NumberVal _) = KeywordVal "key"
