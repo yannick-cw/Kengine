@@ -11,7 +11,7 @@ import Data.List.NonEmpty qualified as L
 import Data.Map qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
-import Kengine.Errors (IndexError (IndexError))
+import Kengine.Errors (SearchError (SearchError))
 import Kengine.Types (
   Document (Document),
   Field (..),
@@ -31,12 +31,12 @@ tokenize = fmap (Token . T.toLower) . filter (not . T.null) . splitNonAlpha
 splitNonAlpha :: Term -> [Text]
 splitNonAlpha (Term t) = T.split (\tkn -> not (C.isAscii tkn && C.isAlphaNum tkn)) t
 
-parseDocument :: AE.Value -> Mapping -> Either IndexError Document
+parseDocument :: AE.Value -> Mapping -> Either SearchError Document
 parseDocument jVal Mapping{fields} =
   let
     document = AE.withObject "Document" (docParser fields)
    in
-    first (IndexError . T.pack) (AE.Types.parseEither document jVal)
+    first (SearchError . T.pack) (AE.Types.parseEither document jVal)
 
 docParser :: L.NonEmpty Field -> AE.Object -> AE.Types.Parser Document
 docParser fields obj =

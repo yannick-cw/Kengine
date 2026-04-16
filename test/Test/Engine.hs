@@ -19,7 +19,7 @@ import Hedgehog (
  )
 import Hedgehog.Gen qualified as Gen
 import Kengine.Engine (Token (..), parseDocument, tokenize)
-import Kengine.Errors (IndexError (..))
+import Kengine.Errors (SearchError (..))
 import Kengine.Types (
   Document (Document),
   FieldName,
@@ -82,7 +82,7 @@ docSpec = do
       let validatedDoc = parseDocument jsonObj mapping
       annotateShow validatedDoc
       case validatedDoc of
-        Left (IndexError msg) ->
+        Left (SearchError msg) ->
           diff "not found" T.isInfixOf msg
         Right _ -> failure
     it "rejects invalid docunents with wrong type" $ hedgehog $ do
@@ -93,7 +93,7 @@ docSpec = do
       let validatedDoc = parseDocument jsonObj mapping
       annotateShow validatedDoc
       case validatedDoc of
-        Left (IndexError _) -> success
+        Left (SearchError _) -> success
         Right _ -> failure
 
 docToJson :: Map.Map FieldName FieldValue -> AE.Value

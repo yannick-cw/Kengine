@@ -9,7 +9,7 @@ import Data.Maybe qualified as M
 import Data.Set qualified as S
 import GHC.Conc qualified as TVar
 import Kengine.Engine (Token, parseDocument, tokenize)
-import Kengine.Errors (IOE, IndexError (IndexError), SearchError)
+import Kengine.Errors (IOE, SearchError (SearchError))
 import Kengine.Mapping (validateMapping)
 import Kengine.Types (
   DocId (DocId),
@@ -27,42 +27,50 @@ import Refined (unrefine)
 import Validation qualified as V (validationToEither)
 
 data Store = Store
-  { createIndex :: IndexName -> Mapping -> IOE IndexError IndexResponse
-  , indexDoc :: IndexName -> AE.Value -> IOE IndexError IndexResponse
+  { createIndex :: IndexName -> Mapping -> IOE SearchError IndexResponse
+  , indexDoc :: IndexName -> AE.Value -> IOE SearchError IndexResponse
   , search :: IndexName -> Query -> IOE SearchError SearchResults
   }
 
--- TODO right now nothing is index specific!!
-
 type InvertedIndex = Map.Map Token (S.Set DocId)
 type DocStore = Map.Map DocId Document
-type Mappings = (Map.Map IndexName Mapping)
+data IndexData = IndexData Mapping (TVar.TVar DocStore) (TVar.TVar InvertedIndex)
+type IndexView = (Map.Map IndexName IndexData)
 
 mkStore :: IO Store
 mkStore = do
-  mappingVar :: TVar.TVar Mappings <- TVar.newTVarIO Map.empty
-  docStoreVar :: TVar.TVar DocStore <- TVar.newTVarIO Map.empty
-  invertedIndexVar :: TVar.TVar InvertedIndex <- TVar.newTVarIO Map.empty
+  indexViewVar :: TVar.TVar IndexView <- TVar.newTVarIO Map.empty
   pure
     Store
-      { createIndex = createIndex mappingVar
+      { createIndex = createIndex indexViewVar
       , indexDoc = \name jval -> do
-          (newId, doc) <- indexDoc mappingVar docStoreVar name jval
+          idxView <- liftIO $ TVar.readTVarIO indexViewVar
+          (IndexData mapping docStoreVar invertedIndexVar) <- lookupIndex name idxView
+          (newId, doc) <- indexDoc mapping docStoreVar jval
           storeTokens invertedIndexVar newId doc
           pure IndexResponse{status = Indexed}
-      , search = search docStoreVar invertedIndexVar
+      , search = \name query -> do
+          idxView <- liftIO $ TVar.readTVarIO indexViewVar
+          (IndexData _ docStoreVar invertedIndexVar) <- lookupIndex name idxView
+          invertedIndex <- liftIO $ TVar.readTVarIO invertedIndexVar
+          docStore <- liftIO $ TVar.readTVarIO docStoreVar
+          search docStore invertedIndex query
       }
 
--- TODO everything needs to be index specific
+lookupIndex :: IndexName -> IndexView -> IOE SearchError IndexData
+lookupIndex name indexView =
+  ExceptT . pure $
+    maybe
+      (Left $ SearchError ("No index found: " <> unrefine name))
+      Right
+      (Map.lookup name indexView)
+
 search ::
-  TVar.TVar DocStore ->
-  TVar.TVar InvertedIndex ->
-  IndexName ->
+  DocStore ->
+  InvertedIndex ->
   Query ->
   IOE SearchError SearchResults
-search docStoreVar invertedIndexVar _ query = do
-  invertedIndex <- liftIO $ TVar.readTVarIO invertedIndexVar
-  docStore <- liftIO $ TVar.readTVarIO docStoreVar
+search docStore invertedIndex query = do
   let results = searchQ query invertedIndex docStore
   pure SearchResults{results}
 
@@ -84,48 +92,45 @@ searchQ (Query query) invertedIndex docStore =
     M.mapMaybe (`Map.lookup` docStore) (S.toList docsWithAllTkns)
 
 createIndex ::
-  TVar.TVar (Map.Map IndexName Mapping) ->
+  TVar.TVar IndexView ->
   IndexName ->
   Mapping ->
-  IOE IndexError IndexResponse
-createIndex mappingVar name mapping = do
+  IOE SearchError IndexResponse
+createIndex indexViewVar name mapping = do
   _ <- ExceptT $ TVar.atomically $ do
-    existingMappings <- TVar.readTVar mappingVar
+    existingMappings <- TVar.readTVar indexViewVar
     let validMapping =
           V.validationToEither $ validateMapping name (Map.keys existingMappings) mapping
+    newIndexData <- traverse createIndexData validMapping
     traverse
-      (\m -> TVar.writeTVar mappingVar (Map.insert name m existingMappings))
-      validMapping
+      (\idxData -> TVar.writeTVar indexViewVar (Map.insert name idxData existingMappings))
+      newIndexData
   pure IndexResponse{status = Created}
+  where
+    createIndexData :: Mapping -> TVar.STM IndexData
+    createIndexData validMapping = do
+      docStoreVar :: TVar.TVar DocStore <- TVar.newTVar Map.empty
+      invertedIndexVar :: TVar.TVar InvertedIndex <- TVar.newTVar Map.empty
+      pure $ IndexData validMapping docStoreVar invertedIndexVar
 
 indexDoc ::
-  TVar.TVar (Map.Map IndexName Mapping) ->
-  TVar.TVar (Map.Map DocId Document) ->
-  IndexName ->
+  Mapping ->
+  TVar.TVar DocStore ->
   AE.Value ->
-  IOE IndexError (DocId, Document)
-indexDoc mappingVar docStoreVar name doc = do
-  mappingStore <- liftIO $ TVar.readTVarIO mappingVar
-  mapping <- lookupMappig mappingStore
+  IOE SearchError (DocId, Document)
+indexDoc mapping docStoreVar doc = do
   docToIndex <- ExceptT . pure $ parseDocument doc mapping
   liftIO $ TVar.atomically $ do
     docStore <- TVar.readTVar docStoreVar
     let nextDocId = maybe (DocId 1) (\(_, DocId dId) -> DocId (dId + 1)) (L.unsnoc (Map.keys docStore))
     TVar.writeTVar docStoreVar (Map.insert nextDocId docToIndex docStore)
     pure (nextDocId, docToIndex)
-  where
-    lookupMappig mappingStore =
-      ExceptT . pure $
-        maybe
-          (Left $ IndexError ("No index found: " <> unrefine name))
-          Right
-          (Map.lookup name mappingStore)
 
 storeTokens ::
   TVar.TVar InvertedIndex ->
   DocId ->
   Document ->
-  IOE IndexError ()
+  IOE SearchError ()
 storeTokens invertedIndexVar docId doc = do
   liftIO $ TVar.atomically $ do
     invertedIndex <- TVar.readTVar invertedIndexVar
@@ -133,7 +138,6 @@ storeTokens invertedIndexVar docId doc = do
     TVar.writeTVar invertedIndexVar updatedIndex
 
 -- todo test
-
 updateIndex ::
   DocId ->
   Document ->

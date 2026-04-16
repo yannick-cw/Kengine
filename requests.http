@@ -11,6 +11,17 @@ Content-Type: application/json
   ]
 }
 
+### Create another index
+PUT http://localhost:3333/indexes/items
+Content-Type: application/json
+
+{
+  "fields": [
+    {"fieldName": "title", "sType": "Text"}
+  ]
+}
+
+
 ### Index a document
 POST http://localhost:3333/indexes/products/documents
 Content-Type: application/json
@@ -20,6 +31,14 @@ Content-Type: application/json
   "category": "dairy",
   "organic": true,
   "price": 1.29
+}
+
+### Index in another index
+POST http://localhost:3333/indexes/items/documents
+Content-Type: application/json
+
+{
+  "title": "Test item"
 }
 
 ### Index another document
@@ -34,7 +53,10 @@ Content-Type: application/json
 }
 
 ### Search
-GET http://localhost:3333/indexes/products/search?q=milch
+GET http://localhost:3333/indexes/products/search?q=bio
+
+### Search other index
+GET http://localhost:3333/indexes/items/search?q=test
 
 ### Search multi-term
 GET http://localhost:3333/indexes/products/search?q=bio milch
