@@ -1,10 +1,13 @@
 module Kengine.Engine (parseDocument, tokenize, Token (..)) where
 
+import Data.Aeson ((.:))
 import Data.Aeson qualified as AE
 import Data.Aeson.Key qualified as AE.Types.Key
-import Data.Aeson.KeyMap qualified as AE.KeyMap
+import Data.Aeson.Types qualified as AE.Types
+import Data.Bifunctor (first)
 import Data.Char qualified as C
 import Data.List.NonEmpty (toList)
+import Data.List.NonEmpty qualified as L
 import Data.Map qualified as Map
 import Data.Scientific qualified as S
 import Data.Text (Text)
@@ -13,7 +16,6 @@ import Kengine.Errors (IndexError (IndexError))
 import Kengine.Types (
   Document (Document),
   Field (..),
-  FieldName,
   FieldValue (BoolVal, KeywordVal, NumberVal, TextVal),
   Mapping (..),
   SearchType (..),
@@ -32,25 +34,25 @@ splitNonAlpha :: Term -> [Text]
 splitNonAlpha (Term t) = T.split (\tkn -> not (C.isAscii tkn && C.isAlphaNum tkn)) t
 
 parseDocument :: AE.Value -> Mapping -> Either IndexError Document
-parseDocument (AE.Object obj) Mapping{fields} =
+parseDocument jVal Mapping{fields} =
   let
-    findValue :: FieldName -> SearchType -> Either IndexError FieldValue
-    findValue name expectedType =
-      maybe
-        (Left $ IndexError $ "Missing required field: " <> unrefine name)
-        (parseSearchType expectedType)
-        (AE.KeyMap.lookup (AE.Types.Key.fromText (unrefine name)) obj)
-    parsedDoc =
+    document = AE.withObject "Document" (docParser fields)
+   in
+    first (IndexError . T.pack) (AE.Types.parseEither document jVal)
+
+docParser :: L.NonEmpty Field -> AE.Object -> AE.Types.Parser Document
+docParser fields obj =
+  let
+    parsedFieldVals =
       traverse
-        (\(Field{sType, fieldName}) -> (fieldName,) <$> findValue fieldName sType)
+        ( \((Field{sType, fieldName}) :: Field) ->
+            let key = AE.Types.Key.fromText (unrefine fieldName)
+             in (fieldName,) <$> case sType of
+                  KT.Text -> TextVal <$> obj .: key
+                  KT.Keyword -> KeywordVal <$> obj .: key
+                  KT.Bool -> BoolVal <$> obj .: key
+                  KT.Number -> NumberVal <$> obj .: key
+        )
         fields
    in
-    Document . Map.fromList . toList <$> parsedDoc
-parseDocument _ _ = Left $ IndexError "No valid json object given."
-
-parseSearchType :: SearchType -> AE.Value -> Either IndexError FieldValue
-parseSearchType KT.Text (AE.String txt) = Right $ TextVal txt
-parseSearchType KT.Keyword (AE.String txt) = Right $ KeywordVal txt
-parseSearchType KT.Bool (AE.Bool bool) = Right $ BoolVal bool
-parseSearchType KT.Number (AE.Number num) = Right $ NumberVal (S.toRealFloat num)
-parseSearchType tpe val = Left $ IndexError ("Type: " <> T.show tpe <> " expected, but got: " <> T.show val)
+    Document . Map.fromList . toList <$> parsedFieldVals

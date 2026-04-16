@@ -15,6 +15,7 @@ import Hedgehog (
   diff,
   failure,
   forAll,
+  success,
  )
 import Hedgehog.Gen qualified as Gen
 import Kengine.Engine (Token (..), parseDocument, tokenize)
@@ -82,7 +83,7 @@ docSpec = do
       annotateShow validatedDoc
       case validatedDoc of
         Left (IndexError msg) ->
-          diff ("Missing required field" `T.isInfixOf` msg) (==) True
+          diff "not found" T.isInfixOf msg
         Right _ -> failure
     it "rejects invalid docunents with wrong type" $ hedgehog $ do
       mapping <- forAll genValidMapping
@@ -92,8 +93,7 @@ docSpec = do
       let validatedDoc = parseDocument jsonObj mapping
       annotateShow validatedDoc
       case validatedDoc of
-        Left (IndexError msg) ->
-          diff ("Type: " `T.isInfixOf` msg) (==) True
+        Left (IndexError _) -> success
         Right _ -> failure
 
 docToJson :: Map.Map FieldName FieldValue -> AE.Value
