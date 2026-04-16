@@ -9,7 +9,6 @@ import Data.Char qualified as C
 import Data.List.NonEmpty (toList)
 import Data.List.NonEmpty qualified as L
 import Data.Map qualified as Map
-import Data.Scientific qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
 import Kengine.Errors (IndexError (IndexError))
@@ -18,13 +17,12 @@ import Kengine.Types (
   Field (..),
   FieldValue (BoolVal, KeywordVal, NumberVal, TextVal),
   Mapping (..),
-  SearchType (..),
   Term (..),
  )
 import Kengine.Types qualified as KT
 import Refined (unrefine)
 
-newtype Token = Token Text deriving newtype (Show, Eq)
+newtype Token = Token Text deriving newtype (Show, Eq, Ord)
 
 -- "Bio-Milch 3,5%" becomes ["bio", "milch", "3", "5"]
 tokenize :: Term -> [Token]

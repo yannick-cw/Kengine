@@ -74,15 +74,22 @@ newtype IndexResponse = IndexResponse {status :: IndexResponseStatus}
   deriving stock (Generic, Eq, Show)
 instance ToJSON IndexResponse
 
-newtype SearchResults = SearchResults {results :: [Text]}
+newtype SearchResults = SearchResults {results :: [Document]}
   deriving stock (Generic, Eq, Show)
 instance ToJSON SearchResults
 
 -- Document Types
 
-newtype DocId = DocId Text
+newtype DocId = DocId Int deriving newtype (Eq, Ord)
 newtype Term = Term Text
 
-newtype Document = Document (Map.Map FieldName FieldValue) deriving newtype (Show, Eq)
+newtype Document = Document (Map.Map FieldName FieldValue)
+  deriving stock (Show, Eq, Generic)
+instance ToJSON Document
 data FieldValue = TextVal Text | KeywordVal Text | BoolVal Bool | NumberVal Double
-  deriving stock (Show, Eq)
+  deriving stock (Show, Eq, Generic)
+instance ToJSON FieldValue where
+  toJSON (TextVal txt) = toJSON txt
+  toJSON (KeywordVal txt) = toJSON txt
+  toJSON (BoolVal b) = toJSON b
+  toJSON (NumberVal n) = toJSON n
