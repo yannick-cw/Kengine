@@ -102,7 +102,6 @@ library
         transformers,
         http-types,
         validation-selective, 
-        scientific,
     -- Directories containing source files.
     hs-source-dirs:   src
 
@@ -144,6 +143,7 @@ test-suite kengine-test
                     , Test.Mapping
                     , Test.Engine
                     , Test.Helpers.Generators
+                    , Test.Store.InMemory
     build-depends:
         base ^>=4.21.0.0,
         kengine,
@@ -155,4 +155,5 @@ test-suite kengine-test
         refined,
         containers,
         validation-selective, 
+        transformers,
         scientific,
