@@ -33,6 +33,7 @@ import Test.Helpers.Generators (
   genText,
   genTokenizableText,
   genValidMapping,
+  genValidMappingRequiredField,
  )
 import Test.Hspec (Spec, describe, it, shouldBe)
 import Test.Hspec.Hedgehog (hedgehog)
@@ -73,8 +74,8 @@ docSpec = do
       let validatedDoc = parseDocument jsonObj mapping
       annotateShow validatedDoc
       diff validatedDoc (==) (Right d)
-    it "rejects invalid docunents missing fields" $ hedgehog $ do
-      mapping <- forAll genValidMapping
+    it "rejects invalid documents missing fields" $ hedgehog $ do
+      mapping <- forAll (genValidMappingRequiredField True)
       (Document doc) <- forAll $ genDocForMapping mapping
       toDropKeys <- forAll (Gen.filter (not . null) (Gen.subset (Map.keysSet doc)))
       let missingFieldsDoc = Map.filterWithKey (\k _ -> k `notElem` toDropKeys) doc
@@ -86,7 +87,7 @@ docSpec = do
           diff "not found" T.isInfixOf msg
         Right _ -> failure
     it "rejects invalid docunents with wrong type" $ hedgehog $ do
-      mapping <- forAll genValidMapping
+      mapping <- forAll (genValidMappingRequiredField True)
       (Document doc) <- forAll $ genDocForMapping mapping
       let docWithWrongTpe = fudgeFieldVal <$> doc
       let jsonObj = docToJson docWithWrongTpe

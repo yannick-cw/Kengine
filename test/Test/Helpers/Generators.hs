@@ -1,4 +1,5 @@
 module Test.Helpers.Generators (
+  genValidMappingRequiredField,
   genValidMapping,
   genValidField,
   genValidFieldName,
@@ -21,6 +22,7 @@ import Data.Aeson (Value, object, (.=))
 import Data.Char (isAlphaNum)
 import Data.List.NonEmpty qualified as NE
 import Data.Map qualified as Map
+import Data.Maybe qualified as M
 import Data.Text (Text)
 import Data.Text qualified as T
 import Hedgehog (Gen)
@@ -40,16 +42,20 @@ import Refined (Refined, refine)
 
 -- type generators
 
-genValidMapping :: Gen Mapping
-genValidMapping = do
-  fields <- Gen.nonEmpty (Range.linear 1 10) genValidField
+genValidMappingRequiredField :: Bool -> Gen Mapping
+genValidMappingRequiredField allRequired = do
+  fields <- Gen.nonEmpty (Range.linear 1 10) (genValidField allRequired)
   pure Mapping{fields}
 
-genValidField :: Gen Field
-genValidField = do
+genValidMapping :: Gen Mapping
+genValidMapping = genValidMappingRequiredField False
+
+genValidField :: Bool -> Gen Field
+genValidField allRequired = do
   fieldName <- genValidFieldName
   sType <- Gen.element [Text, Keyword, Bool, Number]
-  pure Field{sType, fieldName}
+  required <- if allRequired then Gen.constant True else Gen.bool
+  pure Field{sType, fieldName, required}
 
 genValidFieldName :: Gen (Refined ValidName Text)
 genValidFieldName = do
@@ -110,16 +116,20 @@ genInvalidSTypeJson = do
 genDocForMapping :: Mapping -> Gen Document
 genDocForMapping (Mapping fields) = do
   fieldValues <- traverse genFieldValue (NE.toList fields)
-  pure $ Document (Map.fromList fieldValues)
+  pure $ Document (Map.fromList $ M.catMaybes fieldValues)
 
-genFieldValue :: Field -> Gen (FieldName, FieldValue)
+genFieldValue :: Field -> Gen (Maybe (FieldName, FieldValue))
 genFieldValue field = do
-  val <- case field.sType of
-    Text -> TextVal <$> genTextAlphaNum
-    Keyword -> KeywordVal <$> genValidName
-    Bool -> BoolVal <$> Gen.bool
-    Number -> NumberVal <$> Gen.double (Range.linearFrac 0 1000)
-  pure (field.fieldName, val)
+  let fieldValGen = case field.sType of
+        Text -> TextVal <$> genTextAlphaNum
+        Keyword -> KeywordVal <$> genValidName
+        Bool -> BoolVal <$> Gen.bool
+        Number -> NumberVal <$> Gen.double (Range.linearFrac 0 1000)
+  val <-
+    if field.required
+      then Just <$> fieldValGen
+      else Gen.maybe fieldValGen
+  pure $ (field.fieldName,) <$> val
 
 genNonAlphaText :: Gen Text
 genNonAlphaText = Gen.text (Range.linear 1 3) genNonAlphaNum

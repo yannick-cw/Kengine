@@ -15,7 +15,8 @@ module Kengine.Types (
   FieldName,
 ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..))
+import Data.Aeson (FromJSON (..), ToJSON (..), (.!=), (.:), (.:?))
+import Data.Aeson qualified as AE
 import Data.Bifunctor (first)
 import Data.Char (isAlphaNum)
 import Data.List.NonEmpty qualified as L
@@ -40,9 +41,15 @@ newtype Mapping = Mapping {fields :: L.NonEmpty Field} deriving stock (Eq, Show,
 instance FromJSON Mapping
 instance ToJSON Mapping
 
-data Field = Field {sType :: SearchType, fieldName :: FieldName}
+data Field = Field {sType :: SearchType, fieldName :: FieldName, required :: Bool}
   deriving stock (Eq, Show, Generic)
-instance FromJSON Field
+instance FromJSON Field where
+  parseJSON =
+    AE.withObject
+      "Field"
+      ( \ob ->
+          Field <$> ob .: "sType" <*> ob .: "fieldName" <*> ob .:? "required" .!= True
+      )
 instance ToJSON Field
 
 data SearchType = Text | Keyword | Bool | Number deriving stock (Eq, Show, Generic)

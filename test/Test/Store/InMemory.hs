@@ -34,8 +34,8 @@ run :: IOE SearchError ()
 run = do
   Store{createIndex, indexDoc, search} <- liftIO mkStore
   let fields =
-        Field{sType = K.Text, fieldName = $$(R.refineTH "some_text")}
-          :| [Field{sType = K.Text, fieldName = $$(R.refineTH "other_field")}]
+        Field{sType = K.Text, fieldName = $$(R.refineTH "some_text"), required = True}
+          :| [Field{sType = K.Text, fieldName = $$(R.refineTH "other_field"), required = True}]
   let mapping = Mapping{fields}
   let indexName :: IndexName = $$(R.refineTH "test-index")
   let doc1 =

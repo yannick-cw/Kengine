@@ -1,6 +1,6 @@
 module Kengine.Engine (parseDocument, tokenize, Token (..)) where
 
-import Data.Aeson ((.:))
+import Data.Aeson ((.:), (.:?))
 import Data.Aeson qualified as AE
 import Data.Aeson.Key qualified as AE.Types.Key
 import Data.Aeson.Types qualified as AE.Types
@@ -9,6 +9,7 @@ import Data.Char qualified as C
 import Data.List.NonEmpty (toList)
 import Data.List.NonEmpty qualified as L
 import Data.Map qualified as Map
+import Data.Maybe qualified as M
 import Data.Text (Text)
 import Data.Text qualified as T
 import Kengine.Errors (SearchError (SearchError))
@@ -38,19 +39,28 @@ parseDocument jVal Mapping{fields} =
    in
     first (SearchError . T.pack) (AE.Types.parseEither document jVal)
 
+-- todo simplify
 docParser :: L.NonEmpty Field -> AE.Object -> AE.Types.Parser Document
 docParser fields obj =
   let
     parsedFieldVals =
       traverse
-        ( \((Field{sType, fieldName}) :: Field) ->
+        ( \((Field{sType, fieldName, required}) :: Field) ->
             let key = AE.Types.Key.fromText (unrefine fieldName)
-             in (fieldName,) <$> case sType of
-                  KT.Text -> TextVal <$> obj .: key
-                  KT.Keyword -> KeywordVal <$> obj .: key
-                  KT.Bool -> BoolVal <$> obj .: key
-                  KT.Number -> NumberVal <$> obj .: key
+             in if required
+                  then
+                    Just . (fieldName,) <$> case sType of
+                      KT.Text -> TextVal <$> obj .: key
+                      KT.Keyword -> KeywordVal <$> obj .: key
+                      KT.Bool -> BoolVal <$> obj .: key
+                      KT.Number -> NumberVal <$> obj .: key
+                  else
+                    fmap (fieldName,) <$> case sType of
+                      KT.Text -> fmap TextVal <$> obj .:? key
+                      KT.Keyword -> fmap KeywordVal <$> obj .:? key
+                      KT.Bool -> fmap BoolVal <$> obj .:? key
+                      KT.Number -> fmap NumberVal <$> obj .:? key
         )
         fields
    in
-    Document . Map.fromList . toList <$> parsedFieldVals
+    Document . Map.fromList . M.catMaybes . toList <$> parsedFieldVals
