@@ -6,22 +6,27 @@ import Data.Aeson qualified as AE
 import Data.List qualified as L
 import Data.Map qualified as Map
 import Data.Maybe qualified as M
-import Data.Set qualified as S
 import GHC.Conc qualified as TVar
-import Kengine.Engine (Token, parseDocument, tokenize)
+import Kengine.Engine (parseDocument, searchQ, tokenize)
 import Kengine.Errors (IOE, SearchError (SearchError))
 import Kengine.Mapping (validateMapping)
 import Kengine.Types (
   DocId (DocId),
+  DocStore,
   Document (Document),
   FieldValue (TextVal),
+  IndexData (..),
   IndexName,
   IndexResponse (..),
   IndexResponseStatus (..),
+  IndexView,
+  InvertedIndex,
   Mapping (..),
-  Query (Query),
+  Query,
   SearchResults (..),
   Term (Term),
+  TermFrequency (..),
+  Token,
  )
 import Refined (unrefine)
 import Validation qualified as V (validationToEither)
@@ -31,11 +36,6 @@ data Store = Store
   , indexDoc :: IndexName -> AE.Value -> IOE SearchError IndexResponse
   , search :: IndexName -> Query -> IOE SearchError SearchResults
   }
-
-type InvertedIndex = Map.Map Token (S.Set DocId)
-type DocStore = Map.Map DocId Document
-data IndexData = IndexData Mapping (TVar.TVar DocStore) (TVar.TVar InvertedIndex)
-type IndexView = (Map.Map IndexName IndexData)
 
 mkStore :: IO Store
 mkStore = do
@@ -54,7 +54,7 @@ mkStore = do
           (IndexData _ docStoreVar invertedIndexVar) <- lookupIndex name idxView
           invertedIndex <- liftIO $ TVar.readTVarIO invertedIndexVar
           docStore <- liftIO $ TVar.readTVarIO docStoreVar
-          search docStore invertedIndex query
+          pure $ SearchResults (searchQ query invertedIndex docStore)
       }
 
 lookupIndex :: IndexName -> IndexView -> IOE SearchError IndexData
@@ -64,32 +64,6 @@ lookupIndex name indexView =
       (Left $ SearchError ("No index found: " <> unrefine name))
       Right
       (Map.lookup name indexView)
-
-search ::
-  DocStore ->
-  InvertedIndex ->
-  Query ->
-  IOE SearchError SearchResults
-search docStore invertedIndex query = do
-  let results = searchQ query invertedIndex docStore
-  pure SearchResults{results}
-
--- TODO test
-searchQ ::
-  Query ->
-  InvertedIndex ->
-  DocStore ->
-  [Document]
-searchQ (Query query) invertedIndex docStore =
-  let
-    tokenizedQ = tokenize $ Term query
-    docs = traverse (`Map.lookup` invertedIndex) tokenizedQ
-    docsWithAllTkns = case docs of
-      Nothing -> S.empty
-      (Just []) -> S.empty
-      (Just (fstDocIds : restDocIds)) -> foldl' S.intersection fstDocIds restDocIds
-   in
-    M.mapMaybe (`Map.lookup` docStore) (S.toList docsWithAllTkns)
 
 createIndex ::
   TVar.TVar IndexView ->
@@ -137,7 +111,6 @@ storeTokens invertedIndexVar docId doc = do
     let updatedIndex = updateIndex docId doc invertedIndex
     TVar.writeTVar invertedIndexVar updatedIndex
 
--- todo test
 updateIndex ::
   DocId ->
   Document ->
@@ -154,7 +127,15 @@ updateIndex docId (Document docs) invertedIndex =
         (Map.toList docs)
     tokens = textFields >>= tokenize
    in
-    L.foldl'
-      (\invIndex nextTkn -> Map.insertWith S.union nextTkn (S.singleton docId) invIndex)
-      invertedIndex
-      tokens
+    L.foldl' updateInvertedIndex invertedIndex tokens
+  where
+    -- creates a new map if that token appears first - otherwise updates the existing inner map
+    updateInvertedIndex :: InvertedIndex -> Token -> InvertedIndex
+    updateInvertedIndex invertedIdx tkn =
+      Map.alter
+        (maybe (Just $ Map.singleton docId (TF 1)) (Just . updateTermFrequency))
+        tkn
+        invertedIdx
+    -- creates a new map if docId for that term appears first - otherwise adds 1
+    updateTermFrequency :: Map.Map DocId TermFrequency -> Map.Map DocId TermFrequency
+    updateTermFrequency = Map.alter (maybe (Just $ TF 1) (\tf -> Just (tf + 1))) docId

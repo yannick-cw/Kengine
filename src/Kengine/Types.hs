@@ -2,6 +2,7 @@ module Kengine.Types (
   Mapping (..),
   Field (..),
   SearchType (..),
+  SearchResult (..),
   IndexName,
   Query (..),
   IndexResponse (..),
@@ -11,8 +12,16 @@ module Kengine.Types (
   Term (..),
   DocId (..),
   Document (..),
+  fromDoc,
+  Score (..),
   FieldValue (..),
   FieldName,
+  InvertedIndex,
+  DocStore,
+  IndexData (..),
+  IndexView,
+  Token (..),
+  TermFrequency (..),
 ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), (.!=), (.:), (.:?))
@@ -25,6 +34,7 @@ import Data.Text (Text)
 import Data.Text qualified as T (all, null)
 import Data.Text.Lazy qualified as LT
 import Data.Typeable (typeRep)
+import GHC.Conc qualified as TVar
 import GHC.Generics (Generic)
 import Refined (
   Predicate (validate),
@@ -35,6 +45,15 @@ import Refined (
   throwRefineOtherException,
  )
 import Web.Scotty (Parsable (parseParam))
+
+-- data types
+
+-- how often a token appears in a document
+newtype TermFrequency = TF Int deriving newtype (Num)
+type InvertedIndex = Map.Map Token (Map.Map DocId TermFrequency)
+type DocStore = Map.Map DocId Document
+data IndexData = IndexData Mapping (TVar.TVar DocStore) (TVar.TVar InvertedIndex)
+type IndexView = (Map.Map IndexName IndexData)
 
 -- Creation Types
 newtype Mapping = Mapping {fields :: L.NonEmpty Field} deriving stock (Eq, Show, Generic)
@@ -81,7 +100,7 @@ newtype IndexResponse = IndexResponse {status :: IndexResponseStatus}
   deriving stock (Generic, Eq, Show)
 instance ToJSON IndexResponse
 
-newtype SearchResults = SearchResults {results :: [Document]}
+newtype SearchResults = SearchResults {results :: [SearchResult]}
   deriving stock (Generic, Eq, Show)
 instance ToJSON SearchResults
 
@@ -89,6 +108,8 @@ instance ToJSON SearchResults
 
 newtype DocId = DocId Int deriving newtype (Eq, Ord)
 newtype Term = Term Text
+
+newtype Token = Token Text deriving newtype (Show, Eq, Ord)
 
 newtype Document = Document (Map.Map FieldName FieldValue)
   deriving stock (Show, Eq, Generic)
@@ -100,3 +121,15 @@ instance ToJSON FieldValue where
   toJSON (KeywordVal txt) = toJSON txt
   toJSON (BoolVal b) = toJSON b
   toJSON (NumberVal n) = toJSON n
+
+newtype Score = Score Float deriving stock (Show, Eq, Generic)
+instance ToJSON Score where
+  toJSON (Score s) = toJSON s
+data SearchResult = SearchResult (Map.Map FieldName FieldValue) Score
+  deriving stock (Show, Eq, Generic)
+instance ToJSON SearchResult
+instance Ord SearchResult where
+  (<=) (SearchResult _ (Score s1)) (SearchResult _ (Score s2)) = s1 <= s2
+
+fromDoc :: Float -> Document -> SearchResult
+fromDoc tfIdt (Document m) = SearchResult m (Score tfIdt)

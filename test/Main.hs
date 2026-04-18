@@ -12,4 +12,5 @@ main = hspec $ parallel $ do
   Test.Mapping.spec
   Test.Engine.tokenizeSpec
   Test.Engine.docSpec
+  Test.Engine.searchSpec
   Test.Store.InMemory.spec

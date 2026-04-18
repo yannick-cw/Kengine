@@ -1,4 +1,4 @@
-module Test.Engine (tokenizeSpec, docSpec) where
+module Test.Engine (tokenizeSpec, docSpec, searchSpec) where
 
 import Data.Aeson qualified as AE
 import Data.Aeson.Key qualified as AE.Key
@@ -18,13 +18,18 @@ import Hedgehog (
   success,
  )
 import Hedgehog.Gen qualified as Gen
-import Kengine.Engine (Token (..), parseDocument, tokenize)
+import Kengine.Engine (Token (..), parseDocument, searchQ, tokenize)
 import Kengine.Errors (SearchError (..))
 import Kengine.Types (
+  DocId (DocId),
   Document (Document),
   FieldName,
   FieldValue (BoolVal, KeywordVal, NumberVal, TextVal),
+  Query (..),
+  Score (..),
+  SearchResult (..),
   Term (..),
+  TermFrequency (..),
  )
 import Refined (unrefine)
 import Test.Helpers.Generators (
@@ -96,6 +101,35 @@ docSpec = do
       case validatedDoc of
         Left (SearchError _) -> success
         Right _ -> failure
+
+searchSpec :: Spec
+searchSpec = do
+  describe "scoring" $ do
+    it "calculates correct TF IDF score" $
+      -- TF(t, d) = number of times term t appears in document d
+      -- IDF(t)   = log(N / df(t))
+      -- where N = total document count, df(t) = number of documents containing term t
+      -- here: tfidf d1 = 10 * log(20/2); d2 = 5 * log(20/2);
+      let
+        docStore =
+          Map.fromList $ (\idx -> (DocId idx, Document Map.empty)) <$> [1 .. 20]
+        invertedIdx = Map.fromList [(Token "test", Map.fromList [(DocId 1, TF 10), (DocId 2, TF 5)])]
+        searchRes = searchQ (Query "test") invertedIdx docStore
+       in
+        (\(SearchResult _ (Score s)) -> s) <$> searchRes
+          `shouldBe` [10 * log (20 / 2), 5 * log (20 / 2)]
+    it "matches ALL query terms" $
+      let
+        docStore =
+          Map.fromList $ (\idx -> (DocId idx, Document Map.empty)) <$> [1 .. 20]
+        invertedIdx =
+          Map.fromList
+            [ (Token "test", Map.fromList [(DocId 1, TF 10), (DocId 2, TF 5)])
+            , (Token "and", Map.fromList [(DocId 1, TF 10)])
+            ]
+        searchRes = searchQ (Query "and test") invertedIdx docStore
+       in
+        length searchRes `shouldBe` 1
 
 docToJson :: Map.Map FieldName FieldValue -> AE.Value
 docToJson doc =

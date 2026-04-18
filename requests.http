@@ -17,7 +17,8 @@ Content-Type: application/json
 
 {
   "fields": [
-    {"fieldName": "title", "sType": "Text"}
+    {"fieldName": "title", "sType": "Text"},
+    {"fieldName": "optionalField", "sType": "Text", "required" : false}
   ]
 }
 
@@ -38,7 +39,9 @@ POST http://localhost:3333/indexes/items/documents
 Content-Type: application/json
 
 {
-  "title": "Test item"
+  "title": "Test item",
+  "optionalField": "ok good"
+
 }
 
 ### Index another document
