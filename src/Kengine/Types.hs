@@ -1,4 +1,5 @@
 module Kengine.Types (
+  BM25 (..),
   Mapping (..),
   FieldMetadata,
   MetaData (..),
@@ -53,6 +54,7 @@ import Web.Scotty (Parsable (parseParam))
 -- data types
 
 -- how often a token appears in a document
+newtype BM25 = BM25 Float deriving newtype (Num, Eq, Show)
 newtype TermFrequency = TF Int deriving newtype (Num)
 type InvertedIndex = Map.Map Token (Map.Map DocId TermFrequency)
 type FieldIndex = Map.Map FieldName InvertedIndex
@@ -115,7 +117,7 @@ instance ToJSON SearchResults
 
 -- Document Types
 
-newtype DocId = DocId Int deriving newtype (Eq, Ord)
+newtype DocId = DocId Int deriving newtype (Eq, Ord, Num)
 newtype Term = Term Text
 
 newtype Token = Token Text deriving newtype (Show, Eq, Ord)

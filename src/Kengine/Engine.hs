@@ -1,4 +1,4 @@
-module Kengine.Engine (parseDocument, tokenize, Token (..), searchQ) where
+module Kengine.Engine (parseDocument, tokenize, Token (..), searchQ, updateIndex) where
 
 import Data.Aeson ((.:), (.:?))
 import Data.Aeson qualified as AE
@@ -16,11 +16,11 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Kengine.Errors (SearchError (SearchError))
 import Kengine.Types (
+  BM25 (..),
   DocId,
   DocStore,
   Document (Document),
   Field (..),
-  FieldDocResult,
   FieldIndex,
   FieldMetadata,
   FieldName,
@@ -79,10 +79,6 @@ docParser fields obj =
    in
     Document . Map.fromList . M.catMaybes . toList <$> parsedFieldVals
 
--- TF(t, d) = number of times term t appears in document d
--- IDF(t)   = log(N / df(t))
--- where N = total document count, df(t) = number of documents containing term t
--- here: tfidf d1 = 10 * log(20/2); d2 = 5 * log(20/2);
 searchQ ::
   Query ->
   DocStore ->
@@ -91,28 +87,38 @@ searchQ ::
   [SearchResult]
 searchQ (Query query) docStore fieldIndex fieldMeta =
   let
+    -- each entry is one map of docs of scores for one field
+    perFieldResults :: [Map.Map DocId Score]
     perFieldResults = Map.elems $ Map.mapWithKey searchOneField fieldIndex
     perDocScore = Map.fromListWith (+) (Map.toList =<< perFieldResults)
    in
     L.sortOn Down $ Map.elems $ Map.intersectionWith fromDoc perDocScore docStore
   where
+    -- inverted index for that specific field
     searchOneField :: FieldName -> InvertedIndex -> Map.Map DocId Score
     searchOneField fName invertedIndex =
       let
         tokenizedQ = tokenize $ Term query
-        docs =
-          traverse -- todo safe map call
-            ( \tkn ->
-                calcbm25 (Map.findWithDefault Map.empty fName fieldMeta)
-                  <$> Map.lookup tkn invertedIndex
-            )
-            tokenizedQ
-        docsWithAllTkns = case docs of
-          (Just (fstDocIds : restDocIds)) -> foldl' (Map.intersectionWith (+)) fstDocIds restDocIds
-          _ -> Map.empty
+        metadataForFieldname :: Map.Map DocId MetaData
+        metadataForFieldname = Map.findWithDefault Map.empty fName fieldMeta
+
+        -- Just when all tokens find a doc - Nothing when any token can not be found
+        -- core search logic decision - we could also concat instead that would allow
+        -- if single terms would not be found
+        -- each NEL entry is for one search token
+        matchingDocs :: Maybe (NEL.NonEmpty (Map.Map DocId TermFrequency))
+        matchingDocs = traverse (invertedIndex Map.!?) tokenizedQ >>= NEL.nonEmpty
+
+        -- TF -> BM25 score for each doc
+        docsWithScore :: Maybe (NEL.NonEmpty (Map.Map DocId BM25))
+        docsWithScore = fmap (calcbm25 metadataForFieldname) <$> matchingDocs
+
+        -- crucial, we always insercet -> only documents survice that had a results for EACH search token
+        docsWithAllTkns = maybe Map.empty (foldl1 (Map.intersectionWith (+))) docsWithScore
        in
-        Score <$> docsWithAllTkns
-    calcbm25 :: Map.Map DocId MetaData -> Map.Map DocId TermFrequency -> Map.Map DocId Float
+        (\(BM25 score) -> Score score) <$> docsWithAllTkns
+
+    calcbm25 :: Map.Map DocId MetaData -> Map.Map DocId TermFrequency -> Map.Map DocId BM25
     calcbm25 docsMeta tfMap =
       --   BM25(t, d) = IDF(t) * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (dl / avgdl)))
       --   where:
@@ -124,7 +130,7 @@ searchQ (Query query) docStore fieldIndex fieldMeta =
       --     IDF(t) = log((N - df(t) + 0.5) / (df(t) + 0.5) + 1)
       -- N: 20, df("test") = 2 docs, k1 = 1.2 b = 0.75
       Map.mapWithKey
-        (\docId (TF tf) -> totalDocScore (fromIntegral tf) docId docsMeta)
+        (\docId (TF tf) -> BM25 $ totalDocScore (fromIntegral tf) docId)
         tfMap
       where
         n_total :: Float
@@ -141,5 +147,41 @@ searchQ (Query query) docStore fieldIndex fieldMeta =
           | otherwise = fromIntegral total / fromIntegral (Map.size m)
           where
             total = sum $ (\(MetaData count) -> count) <$> m
-        totalDocScore :: Float -> DocId -> Map.Map DocId MetaData -> Float
-        totalDocScore tf docId metadata = idf * (tf * (1.2 + 1)) / (tf + 1.2 * (1 - 0.75 + 0.75 * (dl docId / avgdl metadata)))
+        totalDocScore :: Float -> DocId -> Float
+        totalDocScore tf docId = idf * (tf * (1.2 + 1)) / (tf + 1.2 * (1 - 0.75 + 0.75 * (dl docId / avgdl docsMeta)))
+
+updateIndex ::
+  DocId ->
+  Document ->
+  FieldIndex ->
+  FieldMetadata ->
+  (FieldIndex, FieldMetadata)
+updateIndex docId (Document fieldNameToValue) fieldIndex fieldMeta =
+  let
+    tokensPerField =
+      Map.mapMaybe
+        ( \case
+            (TextVal txt) -> Just (tokenize $ Term txt)
+            _ -> Nothing
+        )
+        fieldNameToValue
+    allMetadataPerField :: FieldMetadata
+    allMetadataPerField = toPerFieldMetadata <$> tokensPerField
+    -- simple union is enough - this is a new doc, the doc id can not exist yet
+    mergedMeta = Map.unionWith Map.union allMetadataPerField fieldMeta
+
+    -- takes FieldName -> [Token] and merges duplicates to create term frequency of
+    -- each token per field
+    newInvertedIndexForTouchedFields =
+      fmap (Map.singleton docId) . Map.fromListWith (+) . fmap (,TF 1) <$> tokensPerField
+
+    mergedFields =
+      Map.unionWith
+        (Map.unionWith Map.union)
+        newInvertedIndexForTouchedFields
+        fieldIndex
+   in
+    (mergedFields, mergedMeta)
+  where
+    toPerFieldMetadata :: [Token] -> Map.Map DocId MetaData
+    toPerFieldMetadata tkns = Map.singleton docId (MetaData{totalTokens = length tkns})

@@ -51,15 +51,18 @@ spec = do
               [ "some_text" AE..= ("these terms are in both" :: Text)
               , "other_field" AE..= ("banana" :: Text)
               ]
-      (searchRes, bananaRes) <- runIOE $ do
+      (searchRes, bananaRes, nonMatch) <- runIOE $ do
         _ <- createIndex indexName mapping
         for_ [doc1, doc2] (indexDoc indexName)
         searchRes <- search indexName (Query "these terms are in both")
         bananaDoc <- search indexName (Query "banana")
-        pure (searchRes, bananaDoc)
+        -- search terms match AND per field - cross field gives no match
+        nonMatch <- search indexName (Query "banana term")
+        pure (searchRes, bananaDoc, nonMatch)
 
       length searchRes.results `shouldBe` 2
       length bananaRes.results `shouldBe` 1
+      length nonMatch.results `shouldBe` 0
 
     it "only find the doc if it includes the full query (AND query tokens)" $ do
       hedgehog $ do
