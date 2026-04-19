@@ -20,14 +20,19 @@ import Kengine.Types (
   DocStore,
   Document (Document),
   Field (..),
+  FieldDocResult,
+  FieldIndex,
+  FieldName,
   FieldValue (BoolVal, KeywordVal, NumberVal, TextVal),
   InvertedIndex,
   Mapping (..),
   Query (..),
+  Score (Score),
   SearchResult,
   Term (..),
   TermFrequency (TF),
   Token (Token),
+  fromDoc,
  )
 import Kengine.Types qualified as KT
 import Refined (unrefine)
@@ -78,22 +83,27 @@ docParser fields obj =
 -- here: tfidf d1 = 10 * log(20/2); d2 = 5 * log(20/2);
 searchQ ::
   Query ->
-  InvertedIndex ->
   DocStore ->
+  FieldIndex ->
   [SearchResult]
-searchQ (Query query) invertedIndex docStore =
+searchQ (Query query) docStore fieldIndex =
   let
-    tokenizedQ = tokenize $ Term query
-    totalCount = Map.size docStore
-    docs = traverse (\tkn -> calcIdf totalCount <$> Map.lookup tkn invertedIndex) tokenizedQ
-    docsWithAllTkns = case docs of
-      (Just (fstDocIds : restDocIds)) -> foldl' (Map.intersectionWith (+)) fstDocIds restDocIds
-      _ -> Map.empty
+    perFieldResults = Map.elems $ Map.mapWithKey searchOneField fieldIndex
+    perDocScore = Map.fromListWith (+) (Map.toList =<< perFieldResults)
    in
-    L.sortOn Down $
-      Map.elems $
-        Map.intersectionWith KT.fromDoc docsWithAllTkns docStore
+    L.sortOn Down $ Map.elems $ Map.intersectionWith fromDoc perDocScore docStore
   where
+    searchOneField :: FieldName -> InvertedIndex -> Map.Map DocId Score
+    searchOneField fName invertedIndex =
+      let
+        tokenizedQ = tokenize $ Term query
+        totalCount = Map.size $ Map.filter (\(Document doc) -> Map.member fName doc) docStore
+        docs = traverse (\tkn -> calcIdf totalCount <$> Map.lookup tkn invertedIndex) tokenizedQ
+        docsWithAllTkns = case docs of
+          (Just (fstDocIds : restDocIds)) -> foldl' (Map.intersectionWith (+)) fstDocIds restDocIds
+          _ -> Map.empty
+       in
+        Score <$> docsWithAllTkns
     calcIdf :: Int -> Map.Map DocId TermFrequency -> Map.Map DocId Float
     calcIdf totalCount tfMap =
       let

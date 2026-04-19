@@ -1,11 +1,14 @@
+{- HLINT ignore "Use tuple-section" -}
 module Kengine.Store.InMemory (Store (..), mkStore) where
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (ExceptT (..))
 import Data.Aeson qualified as AE
+import Data.Bifunctor (Bifunctor (second))
 import Data.List qualified as L
 import Data.Map qualified as Map
 import Data.Maybe qualified as M
+import Data.Ord (Down (..))
 import GHC.Conc qualified as TVar
 import Kengine.Engine (parseDocument, searchQ, tokenize)
 import Kengine.Errors (IOE, SearchError (SearchError))
@@ -14,6 +17,8 @@ import Kengine.Types (
   DocId (DocId),
   DocStore,
   Document (Document),
+  FieldDocResult,
+  FieldIndex,
   FieldValue (TextVal),
   IndexData (..),
   IndexName,
@@ -27,6 +32,7 @@ import Kengine.Types (
   Term (Term),
   TermFrequency (..),
   Token,
+  fromDoc,
  )
 import Refined (unrefine)
 import Validation qualified as V (validationToEither)
@@ -51,10 +57,10 @@ mkStore = do
           pure IndexResponse{status = Indexed}
       , search = \name query -> do
           idxView <- liftIO $ TVar.readTVarIO indexViewVar
-          (IndexData _ docStoreVar invertedIndexVar) <- lookupIndex name idxView
-          invertedIndex <- liftIO $ TVar.readTVarIO invertedIndexVar
+          (IndexData _ docStoreVar fieldIndexVar) <- lookupIndex name idxView
+          fieldIndex <- liftIO $ TVar.readTVarIO fieldIndexVar
           docStore <- liftIO $ TVar.readTVarIO docStoreVar
-          pure $ SearchResults (searchQ query invertedIndex docStore)
+          pure $ SearchResults{results = searchQ query docStore fieldIndex}
       }
 
 lookupIndex :: IndexName -> IndexView -> IOE SearchError IndexData
@@ -84,8 +90,8 @@ createIndex indexViewVar name mapping = do
     createIndexData :: Mapping -> TVar.STM IndexData
     createIndexData validMapping = do
       docStoreVar :: TVar.TVar DocStore <- TVar.newTVar Map.empty
-      invertedIndexVar :: TVar.TVar InvertedIndex <- TVar.newTVar Map.empty
-      pure $ IndexData validMapping docStoreVar invertedIndexVar
+      fieldIndexVar :: TVar.TVar FieldIndex <- TVar.newTVar Map.empty
+      pure $ IndexData validMapping docStoreVar fieldIndexVar
 
 indexDoc ::
   Mapping ->
@@ -101,41 +107,36 @@ indexDoc mapping docStoreVar doc = do
     pure (nextDocId, docToIndex)
 
 storeTokens ::
-  TVar.TVar InvertedIndex ->
+  TVar.TVar FieldIndex ->
   DocId ->
   Document ->
   IOE SearchError ()
-storeTokens invertedIndexVar docId doc = do
+storeTokens fieldIndexVar docId doc = do
   liftIO $ TVar.atomically $ do
-    invertedIndex <- TVar.readTVar invertedIndexVar
-    let updatedIndex = updateIndex docId doc invertedIndex
-    TVar.writeTVar invertedIndexVar updatedIndex
+    fieldIndex <- TVar.readTVar fieldIndexVar
+    let updatedIndex = updateIndex docId doc fieldIndex
+    TVar.writeTVar fieldIndexVar updatedIndex
 
 updateIndex ::
   DocId ->
   Document ->
-  InvertedIndex ->
-  InvertedIndex
-updateIndex docId (Document docs) invertedIndex =
+  FieldIndex ->
+  FieldIndex
+updateIndex docId (Document docs) fieldIndex =
   let
-    textFields =
-      M.mapMaybe
+    tokenizedFields =
+      Map.mapMaybe
         ( \case
-            (_, TextVal txt) -> Just (Term txt)
+            (TextVal txt) -> Just (tokenize $ Term txt)
             _ -> Nothing
         )
-        (Map.toList docs)
-    tokens = textFields >>= tokenize
+        docs
+    tknsWithCounts = fmap (,TF 1) <$> tokenizedFields
+    newFieldIndx =
+      Map.fromListWith (Map.unionWith (+)) . fmap (second (Map.singleton docId))
+        <$> tknsWithCounts
    in
-    L.foldl' updateInvertedIndex invertedIndex tokens
-  where
-    -- creates a new map if that token appears first - otherwise updates the existing inner map
-    updateInvertedIndex :: InvertedIndex -> Token -> InvertedIndex
-    updateInvertedIndex invertedIdx tkn =
-      Map.alter
-        (maybe (Just $ Map.singleton docId (TF 1)) (Just . updateTermFrequency))
-        tkn
-        invertedIdx
-    -- creates a new map if docId for that term appears first - otherwise adds 1
-    updateTermFrequency :: Map.Map DocId TermFrequency -> Map.Map DocId TermFrequency
-    updateTermFrequency = Map.alter (maybe (Just $ TF 1) (\tf -> Just (tf + 1))) docId
+    Map.unionWith
+      (Map.unionWith (Map.unionWith (+)))
+      newFieldIndx
+      fieldIndex

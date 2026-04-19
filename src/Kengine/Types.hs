@@ -2,6 +2,8 @@ module Kengine.Types (
   Mapping (..),
   Field (..),
   SearchType (..),
+  FieldDocResult,
+  FieldIndex,
   SearchResult (..),
   IndexName,
   Query (..),
@@ -51,8 +53,9 @@ import Web.Scotty (Parsable (parseParam))
 -- how often a token appears in a document
 newtype TermFrequency = TF Int deriving newtype (Num)
 type InvertedIndex = Map.Map Token (Map.Map DocId TermFrequency)
+type FieldIndex = Map.Map FieldName InvertedIndex
 type DocStore = Map.Map DocId Document
-data IndexData = IndexData Mapping (TVar.TVar DocStore) (TVar.TVar InvertedIndex)
+data IndexData = IndexData Mapping (TVar.TVar DocStore) (TVar.TVar FieldIndex)
 type IndexView = (Map.Map IndexName IndexData)
 
 -- Creation Types
@@ -122,14 +125,17 @@ instance ToJSON FieldValue where
   toJSON (BoolVal b) = toJSON b
   toJSON (NumberVal n) = toJSON n
 
-newtype Score = Score Float deriving stock (Show, Eq, Generic)
+newtype Score = Score Float deriving newtype (Show, Eq, Num)
+  deriving stock (Generic)
 instance ToJSON Score where
   toJSON (Score s) = toJSON s
-data SearchResult = SearchResult (Map.Map FieldName FieldValue) Score
+data SearchResult = SearchResult Document Score
   deriving stock (Show, Eq, Generic)
 instance ToJSON SearchResult
 instance Ord SearchResult where
   (<=) (SearchResult _ (Score s1)) (SearchResult _ (Score s2)) = s1 <= s2
 
-fromDoc :: Float -> Document -> SearchResult
-fromDoc tfIdt (Document m) = SearchResult m (Score tfIdt)
+type FieldDocResult = Map.Map DocId (FieldName, Score)
+
+fromDoc :: Score -> Document -> SearchResult
+fromDoc score doc = SearchResult doc score

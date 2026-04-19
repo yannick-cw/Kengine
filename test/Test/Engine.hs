@@ -1,3 +1,5 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 module Test.Engine (tokenizeSpec, docSpec, searchSpec) where
 
 import Data.Aeson qualified as AE
@@ -23,6 +25,7 @@ import Kengine.Errors (SearchError (..))
 import Kengine.Types (
   DocId (DocId),
   Document (Document),
+  FieldIndex,
   FieldName,
   FieldValue (BoolVal, KeywordVal, NumberVal, TextVal),
   Query (..),
@@ -32,6 +35,7 @@ import Kengine.Types (
   TermFrequency (..),
  )
 import Refined (unrefine)
+import Refined qualified as R
 import Test.Helpers.Generators (
   genDocForMapping,
   genNonAlphaText,
@@ -61,7 +65,7 @@ tokenizeSpec = do
       annotateShow tokenized
       diff (L.length tokenized) (==) (L.length termsWithSep)
     it "pure non alpha is discarded" $ hedgehog $ do
-      nonAlphaTxt <- forAll $ genNonAlphaText
+      nonAlphaTxt <- forAll genNonAlphaText
       let tokenized = tokenize $ Term nonAlphaTxt
       annotateShow tokenized
       diff tokenized (==) []
@@ -108,13 +112,18 @@ searchSpec = do
     it "calculates correct TF IDF score" $
       -- TF(t, d) = number of times term t appears in document d
       -- IDF(t)   = log(N / df(t))
-      -- where N = total document count, df(t) = number of documents containing term t
+      -- where N = total document (total docs WITH field) count, df(t) = number of documents containing term t
       -- here: tfidf d1 = 10 * log(20/2); d2 = 5 * log(20/2);
       let
+        fieldName :: FieldName = $$(R.refineTH "search_field")
         docStore =
-          Map.fromList $ (\idx -> (DocId idx, Document Map.empty)) <$> [1 .. 20]
-        invertedIdx = Map.fromList [(Token "test", Map.fromList [(DocId 1, TF 10), (DocId 2, TF 5)])]
-        searchRes = searchQ (Query "test") invertedIdx docStore
+          Map.fromList $
+            (\idx -> (DocId idx, Document (Map.singleton fieldName (TextVal "")))) <$> [1 .. 20]
+        fieldIndex =
+          Map.singleton
+            fieldName
+            (Map.fromList [(Token "test", Map.fromList [(DocId 1, TF 10), (DocId 2, TF 5)])])
+        searchRes = searchQ (Query "test") docStore fieldIndex
        in
         (\(SearchResult _ (Score s)) -> s) <$> searchRes
           `shouldBe` [10 * log (20 / 2), 5 * log (20 / 2)]
@@ -122,12 +131,16 @@ searchSpec = do
       let
         docStore =
           Map.fromList $ (\idx -> (DocId idx, Document Map.empty)) <$> [1 .. 20]
-        invertedIdx =
-          Map.fromList
-            [ (Token "test", Map.fromList [(DocId 1, TF 10), (DocId 2, TF 5)])
-            , (Token "and", Map.fromList [(DocId 1, TF 10)])
-            ]
-        searchRes = searchQ (Query "and test") invertedIdx docStore
+        fieldName :: FieldName = $$(R.refineTH "search_field")
+        fieldIndex =
+          Map.singleton
+            fieldName
+            ( Map.fromList
+                [ (Token "test", Map.fromList [(DocId 1, TF 10), (DocId 2, TF 5)])
+                , (Token "and", Map.fromList [(DocId 1, TF 10)])
+                ]
+            )
+        searchRes = searchQ (Query "and test") docStore fieldIndex
        in
         length searchRes `shouldBe` 1
 
