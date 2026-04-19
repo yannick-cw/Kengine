@@ -25,9 +25,9 @@ import Kengine.Errors (SearchError (..))
 import Kengine.Types (
   DocId (DocId),
   Document (Document),
-  FieldIndex,
   FieldName,
   FieldValue (BoolVal, KeywordVal, NumberVal, TextVal),
+  MetaData (MetaData),
   Query (..),
   Score (..),
   SearchResult (..),
@@ -109,11 +109,21 @@ docSpec = do
 searchSpec :: Spec
 searchSpec = do
   describe "scoring" $ do
-    it "calculates correct TF IDF score" $
-      -- TF(t, d) = number of times term t appears in document d
-      -- IDF(t)   = log(N / df(t))
-      -- where N = total document (total docs WITH field) count, df(t) = number of documents containing term t
-      -- here: tfidf d1 = 10 * log(20/2); d2 = 5 * log(20/2);
+    it "calculates correct bm25 score" $
+      --   BM25(t, d) = IDF(t) * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (dl / avgdl)))
+      --   where:
+      --     tf    = term frequency of t in d
+      --     dl    = document length (total terms in d)
+      --     avgdl = average document length across all documents
+      --     k1    = 1.2 (saturation parameter: higher = less saturation)
+      --     b     = 0.75 (length normalization: 0 = no normalization, 1 = full)
+      --     IDF(t) = log((N - df(t) + 0.5) / (df(t) + 0.5) + 1)
+      -- N: 2, df("test") = 2 docs, k1 = 1.2 b = 0.75
+      -- idf = log((20 - 2 + 0.5) / (2 + 0.5) + 1) = log(8.4)
+      -- avgdl = 7.5
+      -- doc1: tf = 10, dl = 5 => log(8.4) * (10 * (1.2 + 1)) / (10 + 1.2 * (1-0.75 + 0.75 * (5 / 7.5)))
+      -- doc2: tf = 5, dl = 10 => log(8.4) * (5 * (1.2 + 1)) / (5 + 1.2 * (1-0.75 + 0.75 * (10 / 7.5)))
+
       let
         fieldName :: FieldName = $$(R.refineTH "search_field")
         docStore =
@@ -123,10 +133,17 @@ searchSpec = do
           Map.singleton
             fieldName
             (Map.fromList [(Token "test", Map.fromList [(DocId 1, TF 10), (DocId 2, TF 5)])])
-        searchRes = searchQ (Query "test") docStore fieldIndex
+        fieldMeta =
+          Map.singleton
+            fieldName
+            (Map.fromList [(DocId 1, MetaData 5), (DocId 2, MetaData 10)])
+        searchRes = searchQ (Query "test") docStore fieldIndex fieldMeta
+        idf = log ((2 - 2 + 0.5) / (2 + 0.5) + 1)
+        doc1 = idf * (10 * (1.2 + 1)) / (10 + 1.2 * (1 - 0.75 + 0.75 * (5 / 7.5)))
+        doc2 = idf * (5 * (1.2 + 1)) / (5 + 1.2 * (1 - 0.75 + 0.75 * (10 / 7.5)))
        in
         (\(SearchResult _ (Score s)) -> s) <$> searchRes
-          `shouldBe` [10 * log (20 / 2), 5 * log (20 / 2)]
+          `shouldBe` [doc1, doc2]
     it "matches ALL query terms" $
       let
         docStore =
@@ -140,7 +157,11 @@ searchSpec = do
                 , (Token "and", Map.fromList [(DocId 1, TF 10)])
                 ]
             )
-        searchRes = searchQ (Query "and test") docStore fieldIndex
+        fieldMeta =
+          Map.singleton
+            fieldName
+            (Map.fromList [(DocId 1, MetaData 5), (DocId 2, MetaData 10)])
+        searchRes = searchQ (Query "and test") docStore fieldIndex fieldMeta
        in
         length searchRes `shouldBe` 1
 

@@ -22,10 +22,12 @@ import Kengine.Types (
   Field (..),
   FieldDocResult,
   FieldIndex,
+  FieldMetadata,
   FieldName,
   FieldValue (BoolVal, KeywordVal, NumberVal, TextVal),
   InvertedIndex,
   Mapping (..),
+  MetaData (..),
   Query (..),
   Score (Score),
   SearchResult,
@@ -85,8 +87,9 @@ searchQ ::
   Query ->
   DocStore ->
   FieldIndex ->
+  FieldMetadata ->
   [SearchResult]
-searchQ (Query query) docStore fieldIndex =
+searchQ (Query query) docStore fieldIndex fieldMeta =
   let
     perFieldResults = Map.elems $ Map.mapWithKey searchOneField fieldIndex
     perDocScore = Map.fromListWith (+) (Map.toList =<< perFieldResults)
@@ -97,18 +100,46 @@ searchQ (Query query) docStore fieldIndex =
     searchOneField fName invertedIndex =
       let
         tokenizedQ = tokenize $ Term query
-        totalCount = Map.size $ Map.filter (\(Document doc) -> Map.member fName doc) docStore
-        docs = traverse (\tkn -> calcIdf totalCount <$> Map.lookup tkn invertedIndex) tokenizedQ
+        docs =
+          traverse -- todo safe map call
+            ( \tkn ->
+                calcbm25 (Map.findWithDefault Map.empty fName fieldMeta)
+                  <$> Map.lookup tkn invertedIndex
+            )
+            tokenizedQ
         docsWithAllTkns = case docs of
           (Just (fstDocIds : restDocIds)) -> foldl' (Map.intersectionWith (+)) fstDocIds restDocIds
           _ -> Map.empty
        in
         Score <$> docsWithAllTkns
-    calcIdf :: Int -> Map.Map DocId TermFrequency -> Map.Map DocId Float
-    calcIdf totalCount tfMap =
-      let
-        numDocsForTkn = fromIntegral $ Map.size tfMap
-       in
-        Map.map
-          (\(TF tf) -> fromIntegral tf * log (fromIntegral totalCount / numDocsForTkn))
-          tfMap
+    calcbm25 :: Map.Map DocId MetaData -> Map.Map DocId TermFrequency -> Map.Map DocId Float
+    calcbm25 docsMeta tfMap =
+      --   BM25(t, d) = IDF(t) * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (dl / avgdl)))
+      --   where:
+      --     tf    = term frequency of t in d
+      --     dl    = document length (total terms in d)
+      --     avgdl = average document length across all documents
+      --     k1    = 1.2 (saturation parameter: higher = less saturation)
+      --     b     = 0.75 (length normalization: 0 = no normalization, 1 = full)
+      --     IDF(t) = log((N - df(t) + 0.5) / (df(t) + 0.5) + 1)
+      -- N: 20, df("test") = 2 docs, k1 = 1.2 b = 0.75
+      Map.mapWithKey
+        (\docId (TF tf) -> totalDocScore (fromIntegral tf) docId docsMeta)
+        tfMap
+      where
+        n_total :: Float
+        n_total = fromIntegral $ length docsMeta
+        df_t :: Float
+        df_t = fromIntegral $ length tfMap
+        idf :: Float
+        idf = log ((n_total - df_t + 0.5) / (df_t + 0.5) + 1)
+        dl :: DocId -> Float
+        dl docId = maybe 0 (\(MetaData count) -> fromIntegral count) (Map.lookup docId docsMeta)
+        avgdl :: Map.Map DocId MetaData -> Float
+        avgdl m
+          | Map.null m = 1 -- safety net - should be 0
+          | otherwise = fromIntegral total / fromIntegral (Map.size m)
+          where
+            total = sum $ (\(MetaData count) -> count) <$> m
+        totalDocScore :: Float -> DocId -> Map.Map DocId MetaData -> Float
+        totalDocScore tf docId metadata = idf * (tf * (1.2 + 1)) / (tf + 1.2 * (1 - 0.75 + 0.75 * (dl docId / avgdl metadata)))

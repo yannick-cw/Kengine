@@ -19,6 +19,7 @@ import Kengine.Types (
   Document (Document),
   FieldDocResult,
   FieldIndex,
+  FieldMetadata,
   FieldValue (TextVal),
   IndexData (..),
   IndexName,
@@ -27,6 +28,7 @@ import Kengine.Types (
   IndexView,
   InvertedIndex,
   Mapping (..),
+  MetaData (MetaData),
   Query,
   SearchResults (..),
   Term (Term),
@@ -51,16 +53,18 @@ mkStore = do
       { createIndex = createIndex indexViewVar
       , indexDoc = \name jval -> do
           idxView <- liftIO $ TVar.readTVarIO indexViewVar
-          (IndexData mapping docStoreVar invertedIndexVar) <- lookupIndex name idxView
+          (IndexData mapping docStoreVar invertedIndexVar fieldMetaDataVar) <-
+            lookupIndex name idxView
           (newId, doc) <- indexDoc mapping docStoreVar jval
-          storeTokens invertedIndexVar newId doc
+          storeTokens invertedIndexVar fieldMetaDataVar newId doc
           pure IndexResponse{status = Indexed}
       , search = \name query -> do
           idxView <- liftIO $ TVar.readTVarIO indexViewVar
-          (IndexData _ docStoreVar fieldIndexVar) <- lookupIndex name idxView
+          (IndexData _ docStoreVar fieldIndexVar fieldMetaDataVar) <- lookupIndex name idxView
           fieldIndex <- liftIO $ TVar.readTVarIO fieldIndexVar
           docStore <- liftIO $ TVar.readTVarIO docStoreVar
-          pure $ SearchResults{results = searchQ query docStore fieldIndex}
+          fieldMetadata <- liftIO $ TVar.readTVarIO fieldMetaDataVar
+          pure $ SearchResults{results = searchQ query docStore fieldIndex fieldMetadata}
       }
 
 lookupIndex :: IndexName -> IndexView -> IOE SearchError IndexData
@@ -89,9 +93,10 @@ createIndex indexViewVar name mapping = do
   where
     createIndexData :: Mapping -> TVar.STM IndexData
     createIndexData validMapping = do
-      docStoreVar :: TVar.TVar DocStore <- TVar.newTVar Map.empty
-      fieldIndexVar :: TVar.TVar FieldIndex <- TVar.newTVar Map.empty
-      pure $ IndexData validMapping docStoreVar fieldIndexVar
+      docStoreVar <- TVar.newTVar Map.empty
+      fieldIndexVar <- TVar.newTVar Map.empty
+      fieldMetadataVar <- TVar.newTVar Map.empty
+      pure $ IndexData validMapping docStoreVar fieldIndexVar fieldMetadataVar
 
 indexDoc ::
   Mapping ->
@@ -108,21 +113,25 @@ indexDoc mapping docStoreVar doc = do
 
 storeTokens ::
   TVar.TVar FieldIndex ->
+  TVar.TVar FieldMetadata ->
   DocId ->
   Document ->
   IOE SearchError ()
-storeTokens fieldIndexVar docId doc = do
+storeTokens fieldIndexVar fieldMetadataVar docId doc = do
   liftIO $ TVar.atomically $ do
     fieldIndex <- TVar.readTVar fieldIndexVar
-    let updatedIndex = updateIndex docId doc fieldIndex
+    fieldMeta <- TVar.readTVar fieldMetadataVar
+    let (updatedIndex, updatedMeta) = updateIndex docId doc fieldIndex fieldMeta
     TVar.writeTVar fieldIndexVar updatedIndex
+    TVar.writeTVar fieldMetadataVar updatedMeta
 
 updateIndex ::
   DocId ->
   Document ->
   FieldIndex ->
-  FieldIndex
-updateIndex docId (Document docs) fieldIndex =
+  FieldMetadata ->
+  (FieldIndex, FieldMetadata)
+updateIndex docId (Document docs) fieldIndex fieldMeta =
   let
     tokenizedFields =
       Map.mapMaybe
@@ -131,12 +140,16 @@ updateIndex docId (Document docs) fieldIndex =
             _ -> Nothing
         )
         docs
+    newMeta = (\tkns -> Map.singleton docId (MetaData $ length tkns)) <$> tokenizedFields
     tknsWithCounts = fmap (,TF 1) <$> tokenizedFields
     newFieldIndx =
       Map.fromListWith (Map.unionWith (+)) . fmap (second (Map.singleton docId))
         <$> tknsWithCounts
+    mergedFields =
+      Map.unionWith
+        (Map.unionWith (Map.unionWith (+)))
+        newFieldIndx
+        fieldIndex
+    mergedMeta = Map.unionWith (Map.unionWith (+)) newMeta fieldMeta
    in
-    Map.unionWith
-      (Map.unionWith (Map.unionWith (+)))
-      newFieldIndx
-      fieldIndex
+    (mergedFields, mergedMeta)

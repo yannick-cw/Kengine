@@ -1,5 +1,7 @@
 module Kengine.Types (
   Mapping (..),
+  FieldMetadata,
+  MetaData (..),
   Field (..),
   SearchType (..),
   FieldDocResult,
@@ -55,8 +57,12 @@ newtype TermFrequency = TF Int deriving newtype (Num)
 type InvertedIndex = Map.Map Token (Map.Map DocId TermFrequency)
 type FieldIndex = Map.Map FieldName InvertedIndex
 type DocStore = Map.Map DocId Document
-data IndexData = IndexData Mapping (TVar.TVar DocStore) (TVar.TVar FieldIndex)
 type IndexView = (Map.Map IndexName IndexData)
+type FieldMetadata = Map.Map FieldName (Map.Map DocId MetaData)
+newtype MetaData = MetaData {totalTokens :: Int} deriving newtype (Eq, Num, Show)
+
+data IndexData
+  = IndexData Mapping (TVar.TVar DocStore) (TVar.TVar FieldIndex) (TVar.TVar FieldMetadata)
 
 -- Creation Types
 newtype Mapping = Mapping {fields :: L.NonEmpty Field} deriving stock (Eq, Show, Generic)
@@ -125,7 +131,8 @@ instance ToJSON FieldValue where
   toJSON (BoolVal b) = toJSON b
   toJSON (NumberVal n) = toJSON n
 
-newtype Score = Score Float deriving newtype (Show, Eq, Num)
+newtype Score = Score Float
+  deriving newtype (Show, Eq, Num)
   deriving stock (Generic)
 instance ToJSON Score where
   toJSON (Score s) = toJSON s
