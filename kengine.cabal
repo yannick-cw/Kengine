@@ -83,6 +83,7 @@ library
                     , Kengine.Mapping
                     , Kengine.Engine
                     , Kengine.Store.InMemory
+                    , Kengine.Store.Persistence
 
     -- Modules included in this library but not exported.
     other-modules:
@@ -92,6 +93,7 @@ library
 
     -- Other library packages from which modules are imported.
     build-depends: 
+        filepath,
         containers ^>=0.7,
         base ^>=4.21.0.0,
         aeson,
@@ -101,6 +103,7 @@ library
         scotty,
         transformers,
         http-types,
+        directory,
         validation-selective, 
     -- Directories containing source files.
     hs-source-dirs:   src
@@ -144,6 +147,7 @@ test-suite kengine-test
                     , Test.Engine
                     , Test.Helpers.Generators
                     , Test.Store.InMemory
+                    , Test.Store.Persistence
     build-depends:
         base ^>=4.21.0.0,
         kengine,
@@ -157,3 +161,4 @@ test-suite kengine-test
         validation-selective, 
         transformers,
         scientific,
+        directory,
