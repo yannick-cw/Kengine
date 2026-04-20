@@ -17,7 +17,6 @@ import Kengine.Errors (IOE)
 import Kengine.Store.InMemory (Store (..), mkStore)
 import Kengine.Store.Persistence (FileStore (..))
 import Kengine.Types (
-  Document (..),
   Field (..),
   FieldName,
   FieldValue (..),
@@ -37,6 +36,8 @@ emptyFileStore =
   FileStore
     { storeMapping = \_ _ -> pure ()
     , readMappings = pure Map.empty
+    , storeDoc = \_ _ -> pure ()
+    , readDocs = pure Map.empty
     }
 
 spec :: Spec
@@ -80,12 +81,12 @@ spec = do
           forAll $
             (\m -> m{fields = Field{sType = K.Text, fieldName, required = True} NEL.<| m.fields})
               <$> genValidMapping
-        (Document fields) : rest <-
+        fields : rest <-
           forAll $ Gen.list (Range.linear 1 100) (genDocForMapping mapping)
         let query = "test query"
         let notMatchingQuery = Query "test query extraTkn"
         let fstDocWithQuery = Map.adjust (\_ -> TextVal query) fieldName fields
-        let allDocs = toJSON <$> Document fstDocWithQuery : rest
+        let allDocs = toJSON . fmap fieldValueToJSON <$> (fstDocWithQuery : rest)
         annotateShow allDocs
         (searchRes, noMatch) <- liftIO $ runIOE $ do
           Store{createIndex, indexDoc, search} <- mkStore emptyFileStore
@@ -100,3 +101,9 @@ spec = do
 
 runIOE :: (Show e) => IOE e a -> IO a
 runIOE m = runExceptT m >>= either (fail . show) pure
+
+fieldValueToJSON :: FieldValue -> AE.Value
+fieldValueToJSON (TextVal txt) = toJSON txt
+fieldValueToJSON (KeywordVal txt) = toJSON txt
+fieldValueToJSON (BoolVal b) = toJSON b
+fieldValueToJSON (NumberVal n) = toJSON n

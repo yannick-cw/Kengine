@@ -113,10 +113,10 @@ genInvalidSTypeJson = do
   sType <- Gen.text (Range.linear 0 30) Gen.unicode
   pure $ object ["fieldName" .= name, "sType" .= sType]
 
-genDocForMapping :: Mapping -> Gen Document
+genDocForMapping :: Mapping -> Gen (Map.Map FieldName FieldValue)
 genDocForMapping (Mapping fields) = do
   fieldValues <- traverse genFieldValue (NE.toList fields)
-  pure $ Document (Map.fromList $ M.catMaybes fieldValues)
+  pure $ Map.fromList (M.catMaybes fieldValues)
 
 genFieldValue :: Field -> Gen (Maybe (FieldName, FieldValue))
 genFieldValue field = do

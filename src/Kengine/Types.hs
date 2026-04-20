@@ -53,8 +53,9 @@ import Web.Scotty (Parsable (parseParam))
 
 -- data types
 
--- how often a token appears in a document
 newtype BM25 = BM25 Float deriving newtype (Num, Eq, Show)
+
+-- how often a token appears in a document
 newtype TermFrequency = TF Int deriving newtype (Num)
 type InvertedIndex = Map.Map Token (Map.Map DocId TermFrequency)
 type FieldIndex = Map.Map FieldName InvertedIndex
@@ -117,21 +118,26 @@ instance ToJSON SearchResults
 
 -- Document Types
 
-newtype DocId = DocId Int deriving newtype (Eq, Ord, Num)
+newtype DocId = DocId Int
+  deriving newtype (Eq, Ord, Num)
+  deriving stock (Show, Generic)
+instance ToJSON DocId where
+  toJSON (DocId i) = toJSON i
+instance FromJSON DocId where
+  parseJSON v = DocId <$> parseJSON v
 newtype Term = Term Text
 
 newtype Token = Token Text deriving newtype (Show, Eq, Ord)
 
-newtype Document = Document (Map.Map FieldName FieldValue)
+data Document = Document {docId :: DocId, body :: Map.Map FieldName FieldValue}
   deriving stock (Show, Eq, Generic)
 instance ToJSON Document
+instance FromJSON Document
+
 data FieldValue = TextVal Text | KeywordVal Text | BoolVal Bool | NumberVal Double
   deriving stock (Show, Eq, Generic)
-instance ToJSON FieldValue where
-  toJSON (TextVal txt) = toJSON txt
-  toJSON (KeywordVal txt) = toJSON txt
-  toJSON (BoolVal b) = toJSON b
-  toJSON (NumberVal n) = toJSON n
+instance FromJSON FieldValue
+instance ToJSON FieldValue
 
 newtype Score = Score Float
   deriving newtype (Show, Eq, Num)

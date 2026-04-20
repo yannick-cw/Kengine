@@ -78,14 +78,14 @@ docSpec = do
   describe "validate a document" $ do
     it "accepts valid documents for a mapping" $ hedgehog $ do
       mapping <- forAll genValidMapping
-      d@(Document doc) <- forAll $ genDocForMapping mapping
+      doc <- forAll $ genDocForMapping mapping
       let jsonObj = docToJson doc
       let validatedDoc = parseDocument jsonObj mapping
       annotateShow validatedDoc
-      diff validatedDoc (==) (Right d)
+      diff validatedDoc (==) (Right doc)
     it "rejects invalid documents missing fields" $ hedgehog $ do
       mapping <- forAll (genValidMappingRequiredField True)
-      (Document doc) <- forAll $ genDocForMapping mapping
+      doc <- forAll $ genDocForMapping mapping
       toDropKeys <- forAll (Gen.filter (not . null) (Gen.subset (Map.keysSet doc)))
       let missingFieldsDoc = Map.filterWithKey (\k _ -> k `notElem` toDropKeys) doc
       let jsonObj = docToJson missingFieldsDoc
@@ -97,7 +97,7 @@ docSpec = do
         _ -> failure
     it "rejects invalid docunents with wrong type" $ hedgehog $ do
       mapping <- forAll (genValidMappingRequiredField True)
-      (Document doc) <- forAll $ genDocForMapping mapping
+      doc <- forAll $ genDocForMapping mapping
       let docWithWrongTpe = fudgeFieldVal <$> doc
       let jsonObj = docToJson docWithWrongTpe
       let validatedDoc = parseDocument jsonObj mapping
@@ -128,7 +128,8 @@ searchSpec = do
         fieldName :: FieldName = $$(R.refineTH "search_field")
         docStore =
           Map.fromList $
-            (\idx -> (DocId idx, Document (Map.singleton fieldName (TextVal "")))) <$> [1 .. 20]
+            (\idx -> (DocId idx, Document (DocId idx) (Map.singleton fieldName (TextVal ""))))
+              <$> [1 .. 20]
         fieldIndex =
           Map.singleton
             fieldName
@@ -147,7 +148,7 @@ searchSpec = do
     it "matches ALL query terms" $
       let
         docStore =
-          Map.fromList $ (\idx -> (DocId idx, Document Map.empty)) <$> [1 .. 20]
+          Map.fromList $ (\idx -> (DocId idx, Document (DocId idx) Map.empty)) <$> [1 .. 20]
         fieldName :: FieldName = $$(R.refineTH "search_field")
         fieldIndex =
           Map.singleton

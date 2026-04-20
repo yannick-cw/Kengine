@@ -46,7 +46,7 @@ tokenize = fmap (Token . T.toLower) . filter (not . T.null) . splitNonAlpha
 splitNonAlpha :: Term -> [Text]
 splitNonAlpha (Term t) = T.split (\tkn -> not (C.isAscii tkn && C.isAlphaNum tkn)) t
 
-parseDocument :: AE.Value -> Mapping -> Either KengineError Document
+parseDocument :: AE.Value -> Mapping -> Either KengineError (Map.Map FieldName FieldValue)
 parseDocument jVal Mapping{fields} =
   let
     document = AE.withObject "Document" (docParser fields)
@@ -54,7 +54,8 @@ parseDocument jVal Mapping{fields} =
     first (SearchError . T.pack) (AE.Types.parseEither document jVal)
 
 -- todo simplify
-docParser :: NEL.NonEmpty Field -> AE.Object -> AE.Types.Parser Document
+docParser ::
+  NEL.NonEmpty Field -> AE.Object -> AE.Types.Parser (Map.Map FieldName FieldValue)
 docParser fields obj =
   let
     parsedFieldVals =
@@ -77,7 +78,7 @@ docParser fields obj =
         )
         fields
    in
-    Document . Map.fromList . M.catMaybes . toList <$> parsedFieldVals
+    Map.fromList . M.catMaybes . toList <$> parsedFieldVals
 
 searchQ ::
   Query ->
@@ -151,12 +152,11 @@ searchQ (Query query) docStore fieldIndex fieldMeta =
         totalDocScore tf docId = idf * (tf * (1.2 + 1)) / (tf + 1.2 * (1 - 0.75 + 0.75 * (dl docId / avgdl docsMeta)))
 
 updateIndex ::
-  DocId ->
   Document ->
   FieldIndex ->
   FieldMetadata ->
   (FieldIndex, FieldMetadata)
-updateIndex docId (Document fieldNameToValue) fieldIndex fieldMeta =
+updateIndex (Document docId fieldNameToValue) fieldIndex fieldMeta =
   let
     tokensPerField =
       Map.mapMaybe

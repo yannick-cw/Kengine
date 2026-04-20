@@ -16,7 +16,7 @@ import Kengine.Store.Persistence (FileStore (..))
 import Kengine.Types (
   DocId (DocId),
   DocStore,
-  Document,
+  Document (Document),
   FieldIndex,
   FieldMetadata,
   IndexData (..),
@@ -55,8 +55,8 @@ mkStore FileStore{storeMapping, readMappings} = do
           idxView <- liftIO $ TVar.readTVarIO indexViewVar
           (IndexData mapping docStoreVar invertedIndexVar fieldMetaDataVar) <-
             lookupIndex name idxView
-          (newId, doc) <- indexDoc mapping docStoreVar jval
-          storeTokens invertedIndexVar fieldMetaDataVar newId doc
+          doc <- indexDoc mapping docStoreVar jval
+          storeTokens invertedIndexVar fieldMetaDataVar doc
           pure IndexResponse{status = Indexed}
       , search = \name query -> do
           idxView <- liftIO $ TVar.readTVarIO indexViewVar
@@ -102,26 +102,26 @@ indexDoc ::
   Mapping ->
   TVar.TVar DocStore ->
   AE.Value ->
-  IOE KengineError (DocId, Document)
+  IOE KengineError Document
 indexDoc mapping docStoreVar doc = do
   docToIndex <- ExceptT . pure $ parseDocument doc mapping
   liftIO $ TVar.atomically $ do
     docStore <- TVar.readTVar docStoreVar
     let hightestDocId = M.listToMaybe $ L.sortOn Down (Map.keys docStore)
     let nextDocId = maybe (DocId 1) (1 +) hightestDocId
-    TVar.writeTVar docStoreVar (Map.insert nextDocId docToIndex docStore)
-    pure (nextDocId, docToIndex)
+    let newDoc = Document nextDocId docToIndex
+    TVar.writeTVar docStoreVar (Map.insert nextDocId newDoc docStore)
+    pure newDoc
 
 storeTokens ::
   TVar.TVar FieldIndex ->
   TVar.TVar FieldMetadata ->
-  DocId ->
   Document ->
   IOE KengineError ()
-storeTokens fieldIndexVar fieldMetadataVar docId doc = do
+storeTokens fieldIndexVar fieldMetadataVar doc = do
   liftIO $ TVar.atomically $ do
     fieldIndex <- TVar.readTVar fieldIndexVar
     fieldMeta <- TVar.readTVar fieldMetadataVar
-    let (updatedIndex, updatedMeta) = updateIndex docId doc fieldIndex fieldMeta
+    let (updatedIndex, updatedMeta) = updateIndex doc fieldIndex fieldMeta
     TVar.writeTVar fieldIndexVar updatedIndex
     TVar.writeTVar fieldMetadataVar updatedMeta
