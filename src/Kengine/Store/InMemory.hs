@@ -7,10 +7,12 @@ import Data.List qualified as L
 import Data.Map qualified as Map
 import Data.Maybe qualified as M
 import Data.Ord (Down (Down))
+import Data.Text qualified as T
 import GHC.Conc qualified as TVar
 import Kengine.Engine (parseDocument, searchQ, updateIndex)
-import Kengine.Errors (IOE, SearchError (SearchError))
+import Kengine.Errors (IOE, KengineError (SearchError))
 import Kengine.Mapping (validateMapping)
+import Kengine.Store.Persistence (FileStore (..))
 import Kengine.Types (
   DocId (DocId),
   DocStore,
@@ -30,17 +32,25 @@ import Refined (unrefine)
 import Validation qualified as V (validationToEither)
 
 data Store = Store
-  { createIndex :: IndexName -> Mapping -> IOE SearchError IndexResponse
-  , indexDoc :: IndexName -> AE.Value -> IOE SearchError IndexResponse
-  , search :: IndexName -> Query -> IOE SearchError SearchResults
+  { createIndex :: IndexName -> Mapping -> IOE KengineError IndexResponse
+  , indexDoc :: IndexName -> AE.Value -> IOE KengineError IndexResponse
+  , search :: IndexName -> Query -> IOE KengineError SearchResults
   }
 
-mkStore :: IO Store
-mkStore = do
-  indexViewVar :: TVar.TVar IndexView <- TVar.newTVarIO Map.empty
+mkStore :: FileStore -> IOE KengineError Store
+mkStore FileStore{storeMapping, readMappings} = do
+  allMappings <- readMappings
+  liftIO $
+    print
+      ("Loading existing indexes... " <> T.unwords (unrefine <$> Map.keys allMappings))
+  initialIndexView <- liftIO $ TVar.atomically $ traverse createEmptyIdxData allMappings
+  indexViewVar <- liftIO $ TVar.newTVarIO initialIndexView
   pure
     Store
-      { createIndex = createIndex indexViewVar
+      { createIndex = \name m -> do
+          response <- createIndex indexViewVar name m
+          storeMapping name m
+          pure response
       , indexDoc = \name jval -> do
           idxView <- liftIO $ TVar.readTVarIO indexViewVar
           (IndexData mapping docStoreVar invertedIndexVar fieldMetaDataVar) <-
@@ -57,7 +67,7 @@ mkStore = do
           pure $ SearchResults{results = searchQ query docStore fieldIndex fieldMetadata}
       }
 
-lookupIndex :: IndexName -> IndexView -> IOE SearchError IndexData
+lookupIndex :: IndexName -> IndexView -> IOE KengineError IndexData
 lookupIndex name indexView =
   ExceptT . pure $
     maybe
@@ -69,30 +79,30 @@ createIndex ::
   TVar.TVar IndexView ->
   IndexName ->
   Mapping ->
-  IOE SearchError IndexResponse
+  IOE KengineError IndexResponse
 createIndex indexViewVar name mapping = do
   _ <- ExceptT $ TVar.atomically $ do
     existingMappings <- TVar.readTVar indexViewVar
     let validMapping =
           V.validationToEither $ validateMapping name (Map.keys existingMappings) mapping
-    newIndexData <- traverse createIndexData validMapping
+    newIndexData <- traverse createEmptyIdxData validMapping
     traverse
       (\idxData -> TVar.writeTVar indexViewVar (Map.insert name idxData existingMappings))
       newIndexData
   pure IndexResponse{status = Created}
-  where
-    createIndexData :: Mapping -> TVar.STM IndexData
-    createIndexData validMapping = do
-      docStoreVar <- TVar.newTVar Map.empty
-      fieldIndexVar <- TVar.newTVar Map.empty
-      fieldMetadataVar <- TVar.newTVar Map.empty
-      pure $ IndexData validMapping docStoreVar fieldIndexVar fieldMetadataVar
+
+createEmptyIdxData :: Mapping -> TVar.STM IndexData
+createEmptyIdxData validMapping = do
+  docStoreVar <- TVar.newTVar Map.empty
+  fieldIndexVar <- TVar.newTVar Map.empty
+  fieldMetadataVar <- TVar.newTVar Map.empty
+  pure $ IndexData validMapping docStoreVar fieldIndexVar fieldMetadataVar
 
 indexDoc ::
   Mapping ->
   TVar.TVar DocStore ->
   AE.Value ->
-  IOE SearchError (DocId, Document)
+  IOE KengineError (DocId, Document)
 indexDoc mapping docStoreVar doc = do
   docToIndex <- ExceptT . pure $ parseDocument doc mapping
   liftIO $ TVar.atomically $ do
@@ -107,7 +117,7 @@ storeTokens ::
   TVar.TVar FieldMetadata ->
   DocId ->
   Document ->
-  IOE SearchError ()
+  IOE KengineError ()
 storeTokens fieldIndexVar fieldMetadataVar docId doc = do
   liftIO $ TVar.atomically $ do
     fieldIndex <- TVar.readTVar fieldIndexVar

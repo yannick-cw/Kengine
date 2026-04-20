@@ -14,7 +14,7 @@ import Data.Maybe qualified as M
 import Data.Ord (Down (Down))
 import Data.Text (Text)
 import Data.Text qualified as T
-import Kengine.Errors (SearchError (SearchError))
+import Kengine.Errors (KengineError (SearchError))
 import Kengine.Types (
   BM25 (..),
   DocId,
@@ -46,7 +46,7 @@ tokenize = fmap (Token . T.toLower) . filter (not . T.null) . splitNonAlpha
 splitNonAlpha :: Term -> [Text]
 splitNonAlpha (Term t) = T.split (\tkn -> not (C.isAscii tkn && C.isAlphaNum tkn)) t
 
-parseDocument :: AE.Value -> Mapping -> Either SearchError Document
+parseDocument :: AE.Value -> Mapping -> Either KengineError Document
 parseDocument jVal Mapping{fields} =
   let
     document = AE.withObject "Document" (docParser fields)

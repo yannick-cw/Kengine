@@ -21,7 +21,7 @@ import Hedgehog (
  )
 import Hedgehog.Gen qualified as Gen
 import Kengine.Engine (Token (..), parseDocument, searchQ, tokenize)
-import Kengine.Errors (SearchError (..))
+import Kengine.Errors (KengineError (SearchError))
 import Kengine.Types (
   DocId (DocId),
   Document (Document),
@@ -94,7 +94,7 @@ docSpec = do
       case validatedDoc of
         Left (SearchError msg) ->
           diff "not found" T.isInfixOf msg
-        Right _ -> failure
+        _ -> failure
     it "rejects invalid docunents with wrong type" $ hedgehog $ do
       mapping <- forAll (genValidMappingRequiredField True)
       (Document doc) <- forAll $ genDocForMapping mapping
@@ -104,7 +104,7 @@ docSpec = do
       annotateShow validatedDoc
       case validatedDoc of
         Left (SearchError _) -> success
-        Right _ -> failure
+        _ -> failure
 
 searchSpec :: Spec
 searchSpec = do

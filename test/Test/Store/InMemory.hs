@@ -15,6 +15,7 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Kengine.Errors (IOE)
 import Kengine.Store.InMemory (Store (..), mkStore)
+import Kengine.Store.Persistence (FileStore (..))
 import Kengine.Types (
   Document (..),
   Field (..),
@@ -31,11 +32,17 @@ import Test.Helpers.Generators (genDocForMapping, genValidIndexName, genValidMap
 import Test.Hspec (Spec, describe, it, shouldBe)
 import Test.Hspec.Hedgehog (hedgehog)
 
+emptyFileStore :: FileStore
+emptyFileStore =
+  FileStore
+    { storeMapping = \_ _ -> pure ()
+    , readMappings = pure Map.empty
+    }
+
 spec :: Spec
 spec = do
   describe "Store for search" $ do
     it "works e2e" $ do
-      store@Store{createIndex, indexDoc, search} <- mkStore
       let fields =
             Field{sType = K.Text, fieldName = $$(R.refineTH "some_text"), required = True}
               NEL.:| [Field{sType = K.Text, fieldName = $$(R.refineTH "other_field"), required = True}]
@@ -52,6 +59,7 @@ spec = do
               , "other_field" AE..= ("banana" :: Text)
               ]
       (searchRes, bananaRes, nonMatch) <- runIOE $ do
+        Store{createIndex, indexDoc, search} <- mkStore emptyFileStore
         _ <- createIndex indexName mapping
         for_ [doc1, doc2] (indexDoc indexName)
         searchRes <- search indexName (Query "these terms are in both")
@@ -80,7 +88,7 @@ spec = do
         let allDocs = toJSON <$> Document fstDocWithQuery : rest
         annotateShow allDocs
         (searchRes, noMatch) <- liftIO $ runIOE $ do
-          Store{createIndex, indexDoc, search} <- liftIO mkStore
+          Store{createIndex, indexDoc, search} <- mkStore emptyFileStore
           _ <- createIndex indexName mapping
           for_ allDocs (indexDoc indexName)
           searchRes <- search indexName (Query query)

@@ -5,6 +5,7 @@ import Control.Monad.Trans.Except (ExceptT, runExceptT)
 import Data.Aeson (ToJSON)
 import Data.Text.Lazy qualified as TL
 import Kengine.Store.InMemory (Store (..), mkStore)
+import Kengine.Store.Persistence (mkFileStore)
 import Network.HTTP.Types (status400)
 import Web.Scotty (
   ActionM,
@@ -22,8 +23,12 @@ import Web.Scotty (
 import Web.Scotty.Internal.Types (ScottyT)
 
 runServer :: IO ()
-runServer =
-  mkStore >>= scotty 3333 . routes
+runServer = do
+  fileStore <- mkFileStore
+  dbStore <- runExceptT $ mkStore fileStore
+  case dbStore of
+    Right store -> scotty 3333 (routes store)
+    Left err -> print err
 
 routes :: Store -> ScottyT IO ()
 routes Store{createIndex, indexDoc, search} = do
