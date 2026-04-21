@@ -10,12 +10,12 @@ import Data.Foldable (for_)
 import Data.List.NonEmpty qualified as NEL
 import Data.Map qualified as Map
 import Data.Text (Text)
-import Hedgehog (annotateShow, diff, forAll)
+import Hedgehog (annotateShow, diff, evalEither, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Kengine.Errors (IOE)
 import Kengine.Store.InMemory (Store (..), mkStore)
-import Kengine.Store.Persistence (FileStore (..))
+import Kengine.Store.Persistence (FileStore (..), mkFileStore')
 import Kengine.Types (
   Field (..),
   FieldName,
@@ -27,6 +27,8 @@ import Kengine.Types (
  )
 import Kengine.Types qualified as K
 import Refined qualified as R
+import System.Directory (removeDirectoryRecursive)
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Helpers.Generators (genDocForMapping, genValidIndexName, genValidMapping)
 import Test.Hspec (Spec, describe, it, shouldBe)
 import Test.Hspec.Hedgehog (hedgehog)
@@ -43,7 +45,8 @@ emptyFileStore =
 spec :: Spec
 spec = do
   describe "Store for search" $ do
-    it "works e2e" $ do
+    it "works e2e" $ withSystemTempDirectory "kengine-test" $ \dir -> do
+      let store = mkFileStore' dir
       let fields =
             Field{sType = K.Text, fieldName = $$(R.refineTH "some_text"), required = True}
               NEL.:| [Field{sType = K.Text, fieldName = $$(R.refineTH "other_field"), required = True}]
@@ -59,19 +62,23 @@ spec = do
               [ "some_text" AE..= ("these terms are in both" :: Text)
               , "other_field" AE..= ("banana" :: Text)
               ]
-      (searchRes, bananaRes, nonMatch) <- runIOE $ do
-        Store{createIndex, indexDoc, search} <- mkStore emptyFileStore
+      runIOE $ do
+        Store{createIndex, indexDoc, search} <- mkStore store
         _ <- createIndex indexName mapping
         for_ [doc1, doc2] (indexDoc indexName)
         searchRes <- search indexName (Query "these terms are in both")
         bananaDoc <- search indexName (Query "banana")
         -- search terms match AND per field - cross field gives no match
         nonMatch <- search indexName (Query "banana term")
-        pure (searchRes, bananaDoc, nonMatch)
-
-      length searchRes.results `shouldBe` 2
-      length bananaRes.results `shouldBe` 1
-      length nonMatch.results `shouldBe` 0
+        Store{search = fresSearch} <- mkStore store
+        searchResAfterRestart <- fresSearch indexName (Query "these terms are in both")
+        bananaDocAfterRestart <- fresSearch indexName (Query "banana")
+        liftIO $ removeDirectoryRecursive dir
+        liftIO $ length searchRes.results `shouldBe` 2
+        liftIO $ length bananaDoc.results `shouldBe` 1
+        liftIO $ length nonMatch.results `shouldBe` 0
+        liftIO $ searchRes `shouldBe` searchResAfterRestart
+        liftIO $ bananaDoc `shouldBe` bananaDocAfterRestart
 
     it "only find the doc if it includes the full query (AND query tokens)" $ do
       hedgehog $ do
@@ -88,13 +95,17 @@ spec = do
         let fstDocWithQuery = Map.adjust (\_ -> TextVal query) fieldName fields
         let allDocs = toJSON . fmap fieldValueToJSON <$> (fstDocWithQuery : rest)
         annotateShow allDocs
-        (searchRes, noMatch) <- liftIO $ runIOE $ do
-          Store{createIndex, indexDoc, search} <- mkStore emptyFileStore
-          _ <- createIndex indexName mapping
-          for_ allDocs (indexDoc indexName)
-          searchRes <- search indexName (Query query)
-          noMatch <- search indexName notMatchingQuery
-          pure (searchRes, noMatch)
+        (searchRes, noMatch) <-
+          evalEither
+            =<< liftIO
+              ( runExceptT $ do
+                  Store{createIndex, indexDoc, search} <- mkStore emptyFileStore
+                  _ <- createIndex indexName mapping
+                  for_ allDocs (indexDoc indexName)
+                  searchRes <- search indexName (Query query)
+                  noMatch <- search indexName notMatchingQuery
+                  pure (searchRes, noMatch)
+              )
 
         diff (length searchRes.results) (==) 1
         diff (length noMatch.results) (==) 0
