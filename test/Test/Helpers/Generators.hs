@@ -2,6 +2,7 @@ module Test.Helpers.Generators (
   genValidMappingRequiredField,
   genValidMapping,
   genValidField,
+  genDocsForMapping,
   genValidFieldName,
   genValidIndexName,
   genDocForMapping,
@@ -29,6 +30,7 @@ import Hedgehog (Gen)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Kengine.Types (
+  DocId (DocId),
   Document (..),
   Field (..),
   FieldName,
@@ -117,6 +119,10 @@ genDocForMapping :: Mapping -> Gen (Map.Map FieldName FieldValue)
 genDocForMapping (Mapping fields) = do
   fieldValues <- traverse genFieldValue (NE.toList fields)
   pure $ Map.fromList (M.catMaybes fieldValues)
+
+-- shortcoming: all ids 1 right now
+genDocsForMapping :: Mapping -> Gen [Document]
+genDocsForMapping m = Gen.list (Range.linear 1 10) (Document (DocId 1) <$> genDocForMapping m)
 
 genFieldValue :: Field -> Gen (Maybe (FieldName, FieldValue))
 genFieldValue field = do

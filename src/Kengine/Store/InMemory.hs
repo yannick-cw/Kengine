@@ -3,6 +3,7 @@ module Kengine.Store.InMemory (Store (..), mkStore) where
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (ExceptT (..))
 import Data.Aeson qualified as AE
+import Data.Foldable (traverse_)
 import Data.List qualified as L
 import Data.Map qualified as Map
 import Data.Maybe qualified as M
@@ -16,7 +17,7 @@ import Kengine.Store.Persistence (FileStore (..))
 import Kengine.Types (
   DocId (DocId),
   DocStore,
-  Document (Document),
+  Document (..),
   FieldIndex,
   FieldMetadata,
   IndexData (..),
@@ -38,12 +39,16 @@ data Store = Store
   }
 
 mkStore :: FileStore -> IOE KengineError Store
-mkStore FileStore{storeMapping, readMappings} = do
+mkStore FileStore{storeMapping, readMappings, readDocs, storeDoc} = do
   allMappings <- readMappings
+  allDocs <- readDocs
   liftIO $
     print
       ("Loading existing indexes... " <> T.unwords (unrefine <$> Map.keys allMappings))
-  initialIndexView <- liftIO $ TVar.atomically $ traverse createEmptyIdxData allMappings
+  initialIndexView <-
+    liftIO $
+      TVar.atomically $
+        traverse (uncurry createInitialIdxData) (Map.intersectionWith (,) allMappings allDocs)
   indexViewVar <- liftIO $ TVar.newTVarIO initialIndexView
   pure
     Store
@@ -56,7 +61,8 @@ mkStore FileStore{storeMapping, readMappings} = do
           (IndexData mapping docStoreVar invertedIndexVar fieldMetaDataVar) <-
             lookupIndex name idxView
           doc <- indexDoc mapping docStoreVar jval
-          storeTokens invertedIndexVar fieldMetaDataVar doc
+          storeDoc name doc
+          liftIO $ TVar.atomically (storeTokens invertedIndexVar fieldMetaDataVar doc)
           pure IndexResponse{status = Indexed}
       , search = \name query -> do
           idxView <- liftIO $ TVar.readTVarIO indexViewVar
@@ -98,6 +104,14 @@ createEmptyIdxData validMapping = do
   fieldMetadataVar <- TVar.newTVar Map.empty
   pure $ IndexData validMapping docStoreVar fieldIndexVar fieldMetadataVar
 
+createInitialIdxData :: Mapping -> [Document] -> TVar.STM IndexData
+createInitialIdxData validMapping docs = do
+  docStoreVar <- TVar.newTVar $ Map.fromList ((\d -> (d.docId, d)) <$> docs)
+  fieldIndexVar <- TVar.newTVar Map.empty
+  fieldMetadataVar <- TVar.newTVar Map.empty
+  traverse_ (storeTokens fieldIndexVar fieldMetadataVar) docs
+  pure $ IndexData validMapping docStoreVar fieldIndexVar fieldMetadataVar
+
 indexDoc ::
   Mapping ->
   TVar.TVar DocStore ->
@@ -117,9 +131,9 @@ storeTokens ::
   TVar.TVar FieldIndex ->
   TVar.TVar FieldMetadata ->
   Document ->
-  IOE KengineError ()
+  TVar.STM ()
 storeTokens fieldIndexVar fieldMetadataVar doc = do
-  liftIO $ TVar.atomically $ do
+  do
     fieldIndex <- TVar.readTVar fieldIndexVar
     fieldMeta <- TVar.readTVar fieldMetadataVar
     let (updatedIndex, updatedMeta) = updateIndex doc fieldIndex fieldMeta
