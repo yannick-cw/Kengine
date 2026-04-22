@@ -32,6 +32,7 @@ module Kengine.Types (
 import Data.Aeson (FromJSON (..), ToJSON (..), (.!=), (.:), (.:?))
 import Data.Aeson qualified as AE
 import Data.Bifunctor (first)
+import Data.Binary (Binary (..))
 import Data.Char (isAlphaNum)
 import Data.List.NonEmpty qualified as L
 import Data.Map qualified as Map
@@ -46,8 +47,10 @@ import Refined (
   Refined,
   displayRefineException,
   refine,
+  refineFail,
   success,
   throwRefineOtherException,
+  unrefine,
  )
 import Web.Scotty (Parsable (parseParam))
 
@@ -56,13 +59,19 @@ import Web.Scotty (Parsable (parseParam))
 newtype BM25 = BM25 Float deriving newtype (Num, Eq, Show)
 
 -- how often a token appears in a document
-newtype TermFrequency = TF Int deriving newtype (Num)
+newtype TermFrequency = TF Int
+  deriving newtype (Num, Show)
+  deriving stock (Generic)
+instance Binary TermFrequency
 type InvertedIndex = Map.Map Token (Map.Map DocId TermFrequency)
 type FieldIndex = Map.Map FieldName InvertedIndex
 type DocStore = Map.Map DocId Document
 type IndexView = (Map.Map IndexName IndexData)
 type FieldMetadata = Map.Map FieldName (Map.Map DocId MetaData)
-newtype MetaData = MetaData {totalTokens :: Int} deriving newtype (Eq, Num, Show)
+newtype MetaData = MetaData {totalTokens :: Int}
+  deriving newtype (Eq, Num, Show)
+  deriving stock (Generic)
+instance Binary MetaData
 
 data IndexData
   = IndexData Mapping (TVar.TVar DocStore) (TVar.TVar FieldIndex) (TVar.TVar FieldMetadata)
@@ -95,6 +104,9 @@ type FieldName = Refined ValidName Text
 type IndexName = Refined ValidName Text
 instance Parsable IndexName where
   parseParam = first (LT.pack . displayRefineException) . refine . LT.toStrict
+instance Binary FieldName where
+  put = put . unrefine
+  get = refineFail =<< get
 
 data ValidName
 instance Predicate ValidName Text where
@@ -121,16 +133,21 @@ instance ToJSON SearchResults
 newtype DocId = DocId Int
   deriving newtype (Eq, Ord, Num)
   deriving stock (Show, Generic)
+instance Binary DocId
 instance ToJSON DocId where
   toJSON (DocId i) = toJSON i
 instance FromJSON DocId where
   parseJSON v = DocId <$> parseJSON v
 newtype Term = Term Text
 
-newtype Token = Token Text deriving newtype (Show, Eq, Ord)
+newtype Token = Token Text
+  deriving newtype (Show, Eq, Ord)
+  deriving stock (Generic)
+instance Binary Token
 
 data Document = Document {docId :: DocId, body :: Map.Map FieldName FieldValue}
   deriving stock (Show, Eq, Generic)
+instance Binary Document
 instance ToJSON Document
 instance FromJSON Document
 
@@ -138,6 +155,7 @@ data FieldValue = TextVal Text | KeywordVal Text | BoolVal Bool | NumberVal Doub
   deriving stock (Show, Eq, Generic)
 instance FromJSON FieldValue
 instance ToJSON FieldValue
+instance Binary FieldValue
 
 newtype Score = Score Float
   deriving newtype (Show, Eq, Num)

@@ -103,6 +103,7 @@ library
         scotty,
         transformers,
         http-types,
+        binary,
         directory,
         validation-selective, 
     -- Directories containing source files.

@@ -1,7 +1,7 @@
 module Kengine.Store.InMemory (Store (..), mkStore) where
 
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Trans.Except (ExceptT (..))
+import Control.Monad.Trans.Except (ExceptT (..), throwE)
 import Data.Aeson qualified as AE
 import Data.Foldable (traverse_)
 import Data.List qualified as L
@@ -11,7 +11,7 @@ import Data.Ord (Down (Down))
 import Data.Text qualified as T
 import GHC.Conc qualified as TVar
 import Kengine.Engine (parseDocument, searchQ, updateIndex)
-import Kengine.Errors (IOE, KengineError (SearchError))
+import Kengine.Errors (IOE, KengineError (FileError, SearchError))
 import Kengine.Mapping (validateMapping)
 import Kengine.Store.Persistence (FileStore (..))
 import Kengine.Types (
@@ -36,42 +36,65 @@ data Store = Store
   { createIndex :: IndexName -> Mapping -> IOE KengineError IndexResponse
   , indexDoc :: IndexName -> AE.Value -> IOE KengineError IndexResponse
   , search :: IndexName -> Query -> IOE KengineError SearchResults
+  , flushState :: IOE KengineError ()
   }
 
 mkStore :: FileStore -> IOE KengineError Store
-mkStore FileStore{storeMapping, readMappings, readDocs, storeDoc} = do
-  allMappings <- readMappings
-  allDocs <- readDocs
-  liftIO $
-    print
-      ("Loading existing indexes... " <> T.unwords (unrefine <$> Map.keys allMappings))
-  initialIndexView <-
+mkStore
+  FileStore
+    { storeMapping
+    , readIdxs
+    , readMapping
+    , readDocs
+    , storeDoc
+    , readSnapshot
+    , unsafeFlushState
+    } = do
+    allIndexes <- readIdxs
     liftIO $
-      TVar.atomically $
-        traverse (uncurry createInitialIdxData) (Map.intersectionWith (,) allMappings allDocs)
-  indexViewVar <- liftIO $ TVar.newTVarIO initialIndexView
-  pure
-    Store
-      { createIndex = \name m -> do
-          response <- createIndex indexViewVar name m
-          storeMapping name m
-          pure response
-      , indexDoc = \name jval -> do
-          idxView <- liftIO $ TVar.readTVarIO indexViewVar
-          (IndexData mapping docStoreVar invertedIndexVar fieldMetaDataVar) <-
-            lookupIndex name idxView
-          doc <- indexDoc mapping docStoreVar jval
-          storeDoc name doc
-          liftIO $ TVar.atomically (storeTokens invertedIndexVar fieldMetaDataVar doc)
-          pure IndexResponse{status = Indexed}
-      , search = \name query -> do
-          idxView <- liftIO $ TVar.readTVarIO indexViewVar
-          (IndexData _ docStoreVar fieldIndexVar fieldMetaDataVar) <- lookupIndex name idxView
-          fieldIndex <- liftIO $ TVar.readTVarIO fieldIndexVar
-          docStore <- liftIO $ TVar.readTVarIO docStoreVar
-          fieldMetadata <- liftIO $ TVar.readTVarIO fieldMetaDataVar
-          pure $ SearchResults{results = searchQ query docStore fieldIndex fieldMetadata}
-      }
+      print
+        ("Loading existing indexes... " <> T.unwords (unrefine <$> allIndexes))
+    indexView <-
+      traverse
+        ( \idx -> do
+            maybeMapping <- readMapping idx
+            mapping <-
+              maybe
+                (throwE $ FileError ("No mapping found for index: " <> unrefine idx))
+                pure
+                maybeMapping
+            snapshotData <- readSnapshot idx
+            allDocs <- readDocs idx
+            liftIO $ TVar.atomically ((idx,) <$> createInitialIdxData mapping snapshotData allDocs)
+        )
+        allIndexes
+    indexViewVar <- liftIO $ TVar.newTVarIO (Map.fromList indexView)
+    pure
+      Store
+        { createIndex = \name m -> do
+            response <- createIndex indexViewVar name m
+            storeMapping name m
+            pure response
+        , indexDoc = \name jval -> do
+            idxView <- liftIO $ TVar.readTVarIO indexViewVar
+            (IndexData mapping docStoreVar invertedIndexVar fieldMetaDataVar) <-
+              lookupIndex name idxView
+            doc <- indexDoc mapping docStoreVar jval
+            storeDoc name doc
+            liftIO $ TVar.atomically (storeTokens invertedIndexVar fieldMetaDataVar doc)
+            pure IndexResponse{status = Indexed}
+        , search = \name query -> do
+            idxView <- liftIO $ TVar.readTVarIO indexViewVar
+            (IndexData _ docStoreVar fieldIndexVar fieldMetaDataVar) <- lookupIndex name idxView
+            fieldIndex <- liftIO $ TVar.readTVarIO fieldIndexVar
+            docStore <- liftIO $ TVar.readTVarIO docStoreVar
+            fieldMetadata <- liftIO $ TVar.readTVarIO fieldMetaDataVar
+            pure $ SearchResults{results = searchQ query docStore fieldIndex fieldMetadata}
+        , flushState = do
+            idxView <- liftIO $ TVar.readTVarIO indexViewVar
+            _ <- Map.traverseWithKey unsafeFlushState idxView
+            pure ()
+        }
 
 lookupIndex :: IndexName -> IndexView -> IOE KengineError IndexData
 lookupIndex name indexView =
@@ -104,11 +127,13 @@ createEmptyIdxData validMapping = do
   fieldMetadataVar <- TVar.newTVar Map.empty
   pure $ IndexData validMapping docStoreVar fieldIndexVar fieldMetadataVar
 
-createInitialIdxData :: Mapping -> [Document] -> TVar.STM IndexData
-createInitialIdxData validMapping docs = do
-  docStoreVar <- TVar.newTVar $ Map.fromList ((\d -> (d.docId, d)) <$> docs)
-  fieldIndexVar <- TVar.newTVar Map.empty
-  fieldMetadataVar <- TVar.newTVar Map.empty
+createInitialIdxData ::
+  Mapping -> (DocStore, FieldIndex, FieldMetadata) -> [Document] -> TVar.STM IndexData
+createInitialIdxData validMapping (docStore, fieldIdx, fieldMeta) docs = do
+  docStoreVar <-
+    TVar.newTVar $ Map.union docStore (Map.fromList ((\d -> (d.docId, d)) <$> docs))
+  fieldIndexVar <- TVar.newTVar fieldIdx
+  fieldMetadataVar <- TVar.newTVar fieldMeta
   traverse_ (storeTokens fieldIndexVar fieldMetadataVar) docs
   pure $ IndexData validMapping docStoreVar fieldIndexVar fieldMetadataVar
 

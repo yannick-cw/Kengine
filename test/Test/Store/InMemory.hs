@@ -17,17 +17,18 @@ import Kengine.Errors (IOE)
 import Kengine.Store.InMemory (Store (..), mkStore)
 import Kengine.Store.Persistence (FileStore (..), mkFileStore')
 import Kengine.Types (
+  Document,
   Field (..),
   FieldName,
   FieldValue (..),
   IndexName,
   Mapping (..),
   Query (..),
+  SearchResult (..),
   SearchResults (..),
  )
 import Kengine.Types qualified as K
 import Refined qualified as R
-import System.Directory (removeDirectoryRecursive)
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Helpers.Generators (genDocForMapping, genValidIndexName, genValidMapping)
 import Test.Hspec (Spec, describe, it, shouldBe)
@@ -37,9 +38,12 @@ emptyFileStore :: FileStore
 emptyFileStore =
   FileStore
     { storeMapping = \_ _ -> pure ()
-    , readMappings = pure Map.empty
+    , readMapping = \_ -> pure Nothing
+    , readIdxs = pure []
     , storeDoc = \_ _ -> pure ()
-    , readDocs = pure Map.empty
+    , readDocs = \_ -> pure []
+    , unsafeFlushState = \_ _ -> pure ()
+    , readSnapshot = \_ -> undefined
     }
 
 spec :: Spec
@@ -62,6 +66,11 @@ spec = do
               [ "some_text" AE..= ("these terms are in both" :: Text)
               , "other_field" AE..= ("banana" :: Text)
               ]
+      let doc3 =
+            AE.object
+              [ "some_text" AE..= ("this is new" :: Text)
+              , "other_field" AE..= ("ok" :: Text)
+              ]
       runIOE $ do
         Store{createIndex, indexDoc, search} <- mkStore store
         _ <- createIndex indexName mapping
@@ -70,15 +79,24 @@ spec = do
         bananaDoc <- search indexName (Query "banana")
         -- search terms match AND per field - cross field gives no match
         nonMatch <- search indexName (Query "banana term")
-        Store{search = fresSearch} <- mkStore store
+        Store{search = fresSearch, flushState} <- mkStore store
         searchResAfterRestart <- fresSearch indexName (Query "these terms are in both")
         bananaDocAfterRestart <- fresSearch indexName (Query "banana")
-        liftIO $ removeDirectoryRecursive dir
+        flushState
+        indexDoc indexName doc3
+        Store{search = afterCompactSearch} <- mkStore store
+        searchResAfterFlush <- afterCompactSearch indexName (Query "these terms are in both")
+        bananaDocAfterFlush <- afterCompactSearch indexName (Query "banana")
+        doc3Match <- afterCompactSearch indexName (Query "this is new")
         liftIO $ length searchRes.results `shouldBe` 2
         liftIO $ length bananaDoc.results `shouldBe` 1
         liftIO $ length nonMatch.results `shouldBe` 0
         liftIO $ searchRes `shouldBe` searchResAfterRestart
         liftIO $ bananaDoc `shouldBe` bananaDocAfterRestart
+        -- only compare docs, store is different with third doc in the mix
+        liftIO $ srToDoc searchRes `shouldBe` srToDoc searchResAfterFlush
+        liftIO $ srToDoc bananaDoc `shouldBe` srToDoc bananaDocAfterFlush
+        liftIO $ length doc3Match.results `shouldBe` 1
 
     it "only find the doc if it includes the full query (AND query tokens)" $ do
       hedgehog $ do
@@ -118,3 +136,6 @@ fieldValueToJSON (TextVal txt) = toJSON txt
 fieldValueToJSON (KeywordVal txt) = toJSON txt
 fieldValueToJSON (BoolVal b) = toJSON b
 fieldValueToJSON (NumberVal n) = toJSON n
+
+srToDoc :: SearchResults -> [Document]
+srToDoc sr = (\(SearchResult d _) -> d) <$> sr.results

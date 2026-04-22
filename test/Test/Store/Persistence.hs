@@ -2,8 +2,7 @@ module Test.Store.Persistence (spec) where
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (runExceptT)
-import Data.Foldable (for_, traverse_)
-import Data.Map qualified as Map
+import Data.Foldable (traverse_)
 import Hedgehog (diff, evalEither, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -22,17 +21,17 @@ spec :: Spec
 spec = do
   describe "Persistence" $ around (withSystemTempDirectory "kengine-test") $ do
     it "roundtrip any mapping" $ \dir -> hedgehog $ do
-      idxNameMapping <-
-        forAll $ Gen.list (Range.linear 1 10) ((,) <$> genValidIndexName <*> genValidMapping)
-      resultMappings <- liftIO $ runExceptT $ do
+      (idx, mapping) <-
+        forAll ((,) <$> genValidIndexName <*> genValidMapping)
+      resultMapping <- liftIO $ runExceptT $ do
         let store = mkFileStore' dir
-        for_ idxNameMapping (uncurry store.storeMapping)
-        mappings <- store.readMappings
+        store.storeMapping idx mapping
+        resMapping <- store.readMapping idx
         liftIO $ removeDirectoryRecursive dir
-        pure mappings
+        pure resMapping
 
-      mappings <- evalEither resultMappings
-      diff (length mappings) (==) (length idxNameMapping)
+      resMapping <- evalEither resultMapping
+      diff resMapping (==) (Just mapping)
     it "roundtrip any docs" $ \dir -> hedgehog $ do
       idxWithDocs <-
         forAll $
@@ -45,9 +44,9 @@ spec = do
       resultDocs <- liftIO $ runExceptT $ do
         let store = mkFileStore' dir
         traverse_ (\(idx, docs) -> traverse_ (store.storeDoc idx) docs) idxWithDocs
-        docs <- store.readDocs
+        res <- traverse ((\idx -> (idx,) <$> store.readDocs idx) . fst) idxWithDocs
         liftIO $ removeDirectoryRecursive dir
-        pure docs
+        pure res
       docs <- evalEither resultDocs
 
-      diff docs (==) (Map.fromList idxWithDocs)
+      diff docs (==) idxWithDocs
