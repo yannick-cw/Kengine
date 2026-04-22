@@ -31,7 +31,7 @@ runServer = do
     Left err -> print err
 
 routes :: Store -> ScottyT IO ()
-routes Store{createIndex, indexDoc, search} = do
+routes Store{createIndex, indexDoc, search, flushState} = do
   get "/indexes/:name/search" $ do
     n <- pathParam "name"
     q <- queryParam "q"
@@ -44,6 +44,8 @@ routes Store{createIndex, indexDoc, search} = do
     n <- pathParam "name"
     r <- jsonData
     resOrErr (indexDoc n r)
+  post "/flush-state" $ do
+    resOrErr flushState
 
 resOrErr :: (ToJSON a, Show e) => ExceptT e IO a -> ActionM ()
 resOrErr action = do

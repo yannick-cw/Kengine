@@ -22,6 +22,9 @@ Content-Type: application/json
   ]
 }
 
+### flush state
+POST http://localhost:3333/flush-state
+Content-Type: application/json
 
 ### Index a document
 POST http://localhost:3333/indexes/products/documents
