@@ -1,5 +1,8 @@
 module Test.Helpers.Generators (
   genValidMappingRequiredField,
+  genFieldMeta,
+  genSparseIndex,
+  genTokenEntry,
   genValidMapping,
   genValidField,
   genHeader,
@@ -18,6 +21,7 @@ module Test.Helpers.Generators (
   genNonAlphaText,
   genTextAlphaNum,
   genTokenizableText,
+  genState,
 ) where
 
 import Data.Aeson (Value, object, (.=))
@@ -27,19 +31,31 @@ import Data.Map qualified as Map
 import Data.Maybe qualified as M
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Word (Word32)
 import Hedgehog (Gen)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import Kengine.Store.Binary (Header (..))
+import Kengine.Store.Binary (
+  FieldMeta (..),
+  Header (..),
+  SparseIndex (..),
+  TokenEntry (..),
+ )
 import Kengine.Types (
   DocId (DocId),
+  DocStore,
   Document (..),
   Field (..),
+  FieldIndex,
+  FieldMetadata,
   FieldName,
   FieldValue (..),
   IndexName,
   Mapping (..),
+  MetaData (..),
   SearchType (..),
+  TermFrequency (TF),
+  Token (..),
   ValidName,
  )
 import Refined (Refined, refine)
@@ -122,9 +138,10 @@ genDocForMapping (Mapping fields) = do
   fieldValues <- traverse genFieldValue (NE.toList fields)
   pure $ Map.fromList (M.catMaybes fieldValues)
 
--- shortcoming: all ids 1 right now
 genDocsForMapping :: Mapping -> Gen [Document]
-genDocsForMapping m = Gen.list (Range.linear 1 10) (Document (DocId 1) <$> genDocForMapping m)
+genDocsForMapping m = do
+  bodies <- Gen.list (Range.linear 1 10) (genDocForMapping m)
+  pure $ zipWith (Document . DocId) [1 ..] bodies
 
 genFieldValue :: Field -> Gen (Maybe (FieldName, FieldValue))
 genFieldValue field = do
@@ -151,12 +168,14 @@ genTokenizableText = do
   pure tokensWithSep
 
 -- binary - header
+genW32 :: Gen Word32
+genW32 = Gen.word32 (Range.linear 1 1000)
 
 genHeader :: Gen Header
 genHeader = do
   version <- Gen.word8 (Range.linear 0 10)
-  mappingVersion <- Gen.word32 (Range.linear 0 1000)
-  docCount <- Gen.word32 (Range.linear 0 1000)
+  mappingVersion <- genW32
+  docCount <- genW32
   fieldNames <- Gen.list (Range.linear 1 1000) genValidFieldName
   termSparseOffset <- Gen.word64 (Range.linear 0 1000)
   storedFieldsOffset <- Gen.word64 (Range.linear 0 1000)
@@ -171,3 +190,50 @@ genHeader = do
       , storedFieldsOffset
       , docMetadataOffset
       }
+
+genDocId :: Gen DocId
+genDocId = DocId . fromIntegral <$> genW32
+
+genTF :: Gen TermFrequency
+genTF = TF . fromIntegral <$> genW32
+
+genTokenEntry :: Gen TokenEntry
+genTokenEntry = do
+  fieldId <- Gen.word16 (Range.linear 0 1000)
+  token <- Token <$> genText
+  docs <- Gen.list (Range.linear 1 100) ((,) <$> genDocId <*> genTF)
+  pure TokenEntry{fieldId, token, docs}
+
+genSparseIndex :: Gen SparseIndex
+genSparseIndex = do
+  fieldId <- Gen.word16 (Range.linear 0 1000)
+  token <- Token <$> genText
+  firstBlockOffset <- Gen.word64 (Range.linear 1 10000)
+  pure SparseIndex{fieldId, token, firstBlockOffset}
+
+genFieldMeta :: Gen FieldMeta
+genFieldMeta = do
+  fieldId <- Gen.word16 (Range.linear 0 1000)
+  docId <- genDocId
+  tokenCount <- genW32
+  pure FieldMeta{fieldId, docId, tokenCount}
+
+genState :: Gen (DocStore, FieldIndex, FieldMetadata)
+genState = do
+  mapping <- genValidMapping
+  docs <- genDocsForMapping mapping
+  let fieldNames = NE.toList (fmap (.fieldName) mapping.fields)
+  let docStore = Map.fromList ((\d -> (d.docId, d)) <$> docs)
+  fieldIndex <-
+    Map.fromList <$> traverse (\fn -> (fn,) <$> genInvertedIndex) fieldNames
+  metadata <-
+    Map.fromList <$> traverse (\fn -> (fn,) <$> genMetaMap) fieldNames
+  pure (docStore, fieldIndex, metadata)
+  where
+    genInvertedIndex = Gen.map (Range.linear 1 5) $ do
+      tkn <- Token <$> genTextAlphaNum
+      postings <- Gen.map (Range.linear 1 3) ((,) <$> genDocId <*> genTF)
+      pure (tkn, postings)
+    genMetaMap =
+      Gen.map (Range.linear 1 5) $
+        (,) <$> genDocId <*> (MetaData <$> Gen.int (Range.linear 0 100))

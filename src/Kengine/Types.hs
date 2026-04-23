@@ -60,7 +60,7 @@ newtype BM25 = BM25 Float deriving newtype (Num, Eq, Show)
 
 -- how often a token appears in a document
 newtype TermFrequency = TF Int
-  deriving newtype (Num, Show)
+  deriving newtype (Num, Show, Eq)
   deriving stock (Generic)
 instance Binary TermFrequency
 type InvertedIndex = Map.Map Token (Map.Map DocId TermFrequency)

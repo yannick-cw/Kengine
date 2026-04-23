@@ -2,8 +2,30 @@ module Test.Store.Binary (spec) where
 
 import Data.Serialize qualified as C
 import Hedgehog (diff, forAll)
-import Kengine.Store.Binary (getHeader, putHeader)
-import Test.Helpers.Generators (genHeader)
+import Kengine.Store.Binary (
+  decodeState,
+  encodeState,
+  getDocument,
+  getFieldMeta,
+  getHeader,
+  getSparseIndex,
+  getTokenEntry,
+  putDocument,
+  putFieldMeta,
+  putHeader,
+  putSparseIndex,
+  putTokenEntry,
+ )
+import Kengine.Types (DocId (..), Document (..))
+import Test.Helpers.Generators (
+  genDocForMapping,
+  genFieldMeta,
+  genHeader,
+  genSparseIndex,
+  genState,
+  genTokenEntry,
+  genValidMapping,
+ )
 import Test.Hspec (Spec, describe, it)
 import Test.Hspec.Hedgehog (hedgehog)
 
@@ -12,6 +34,26 @@ spec = do
   describe "Binary segment format" $ do
     it "roundtrips the header" $ hedgehog $ do
       header <- forAll genHeader
-      let binHeader = C.runPut $ putHeader header
-      let readHeader = C.runGet getHeader binHeader
-      diff readHeader (==) (Right header)
+      diff (C.runGet getHeader (C.runPut $ putHeader header)) (==) (Right header)
+    it "roundtrips the token entry" $ hedgehog $ do
+      tknEntry <- forAll genTokenEntry
+      diff (C.runGet getTokenEntry (C.runPut $ putTokenEntry tknEntry)) (==) (Right tknEntry)
+    it "roundtrips the sparse index" $ hedgehog $ do
+      sparseIndex <- forAll genSparseIndex
+      diff
+        (C.runGet getSparseIndex (C.runPut $ putSparseIndex sparseIndex))
+        (==)
+        (Right sparseIndex)
+    it "roundtrips document" $ hedgehog $ do
+      mapping <- forAll genValidMapping
+      doc <- forAll $ Document (DocId 1) <$> genDocForMapping mapping
+      diff (C.runGet getDocument (C.runPut $ putDocument doc)) (==) (Right doc)
+    it "roundtrips field meta" $ hedgehog $ do
+      fieldMeta <- forAll genFieldMeta
+      diff (C.runGet getFieldMeta (C.runPut $ putFieldMeta fieldMeta)) (==) (Right fieldMeta)
+    it "roundtrips whole state" $ hedgehog $ do
+      (docStore, fieldIndex, metadata) <- forAll genState
+      diff
+        (decodeState (encodeState docStore fieldIndex metadata))
+        (==)
+        (Right (docStore, fieldIndex, metadata))
