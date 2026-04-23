@@ -2,6 +2,7 @@ module Test.Helpers.Generators (
   genValidMappingRequiredField,
   genValidMapping,
   genValidField,
+  genHeader,
   genDocsForMapping,
   genValidFieldName,
   genValidIndexName,
@@ -29,6 +30,7 @@ import Data.Text qualified as T
 import Hedgehog (Gen)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
+import Kengine.Store.Binary (Header (..))
 import Kengine.Types (
   DocId (DocId),
   Document (..),
@@ -147,3 +149,25 @@ genTokenizableText = do
   seps <- Gen.list (Range.singleton n) genNonAlphaText
   let tokensWithSep = uncurry (<>) <$> zip tokens seps
   pure tokensWithSep
+
+-- binary - header
+
+genHeader :: Gen Header
+genHeader = do
+  version <- Gen.word8 (Range.linear 0 10)
+  mappingVersion <- Gen.word32 (Range.linear 0 1000)
+  docCount <- Gen.word32 (Range.linear 0 1000)
+  fieldNames <- Gen.list (Range.linear 1 1000) genValidFieldName
+  termSparseOffset <- Gen.word64 (Range.linear 0 1000)
+  storedFieldsOffset <- Gen.word64 (Range.linear 0 1000)
+  docMetadataOffset <- Gen.word64 (Range.linear 0 1000)
+  pure
+    Header
+      { version
+      , mappingVersion
+      , docCount
+      , fieldNames
+      , termSparseOffset
+      , storedFieldsOffset
+      , docMetadataOffset
+      }

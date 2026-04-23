@@ -84,6 +84,7 @@ library
                     , Kengine.Engine
                     , Kengine.Store.InMemory
                     , Kengine.Store.Persistence
+                    , Kengine.Store.Binary
 
     -- Modules included in this library but not exported.
     other-modules:
@@ -104,8 +105,9 @@ library
         transformers,
         http-types,
         binary,
+        cereal,
         directory,
-        validation-selective, 
+        validation-selective,
     -- Directories containing source files.
     hs-source-dirs:   src
 
@@ -149,6 +151,7 @@ test-suite kengine-test
                     , Test.Helpers.Generators
                     , Test.Store.InMemory
                     , Test.Store.Persistence
+                    , Test.Store.Binary
     build-depends:
         base ^>=4.21.0.0,
         kengine,
@@ -163,4 +166,5 @@ test-suite kengine-test
         transformers,
         scientific,
         directory,
+        cereal,
         temporary,

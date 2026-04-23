@@ -129,13 +129,19 @@ createEmptyIdxData validMapping = do
 
 createInitialIdxData ::
   Mapping -> (DocStore, FieldIndex, FieldMetadata) -> [Document] -> TVar.STM IndexData
-createInitialIdxData validMapping (docStore, fieldIdx, fieldMeta) docs = do
+createInitialIdxData validMapping (docsFromSnapshot, fieldIdx, fieldMeta) docs = do
   docStoreVar <-
-    TVar.newTVar $ Map.union docStore (Map.fromList ((\d -> (d.docId, d)) <$> docs))
+    TVar.newTVar $ Map.union docsFromSnapshot docsFromAppendLog
   fieldIndexVar <- TVar.newTVar fieldIdx
   fieldMetadataVar <- TVar.newTVar fieldMeta
-  traverse_ (storeTokens fieldIndexVar fieldMetadataVar) docs
+  -- this should in practice just be `docsFromAppendLog` - but in case of crash
+  -- append log docs would have not been cleaned up
+  let docsNewerThanSnapshot = Map.difference docsFromAppendLog docsFromSnapshot
+  traverse_ (storeTokens fieldIndexVar fieldMetadataVar) docsNewerThanSnapshot
   pure $ IndexData validMapping docStoreVar fieldIndexVar fieldMetadataVar
+  where
+    docsFromAppendLog :: Map.Map DocId Document
+    docsFromAppendLog = Map.fromList ((\d -> (d.docId, d)) <$> docs)
 
 indexDoc ::
   Mapping ->

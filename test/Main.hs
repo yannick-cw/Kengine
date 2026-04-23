@@ -3,6 +3,7 @@ module Main (main) where
 import Test.Engine qualified
 import Test.Hspec
 import Test.Mapping qualified
+import Test.Store.Binary qualified
 import Test.Store.InMemory qualified
 import Test.Store.Persistence qualified
 import Test.Types qualified
@@ -16,3 +17,4 @@ main = hspec $ parallel $ do
   Test.Engine.searchSpec
   Test.Store.InMemory.spec
   Test.Store.Persistence.spec
+  Test.Store.Binary.spec

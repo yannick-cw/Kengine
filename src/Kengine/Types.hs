@@ -150,6 +150,8 @@ data Document = Document {docId :: DocId, body :: Map.Map FieldName FieldValue}
 instance Binary Document
 instance ToJSON Document
 instance FromJSON Document
+instance Ord Document where
+  (<=) d1 d2 = d1.docId <= d2.docId
 
 data FieldValue = TextVal Text | KeywordVal Text | BoolVal Bool | NumberVal Double
   deriving stock (Show, Eq, Generic)
