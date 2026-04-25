@@ -59,25 +59,28 @@ mkStore fs = do
       }
 
 loadIndexes :: FileStore -> IOE KengineError (TVar.TVar IndexView)
-loadIndexes fs = do
-  allIndexes <- fs.readIdxs
+loadIndexes FileStore{readIdxs, readMapping, readSnapshot, readDocs} = do
+  allIndexes <- readIdxs
   liftIO $
     print
       ("Loading existing indexes... " <> T.unwords (unrefine <$> allIndexes))
   indexDatas <-
     traverse
       ( \idx -> do
-          mapping <- requireMapping fs idx
-          snapshotData <- fs.readSnapshot idx
-          allDocs <- fs.readDocs idx
+          mapping <- requireMapping readMapping idx
+          snapshotData <- readSnapshot idx
+          allDocs <- readDocs idx
           (idx,) <$> liftIO (TVar.newTVarIO $ createInitialIdxData mapping snapshotData allDocs)
       )
       allIndexes
   liftIO $ TVar.newTVarIO (Map.fromList indexDatas)
 
-requireMapping :: FileStore -> IndexName -> IOE KengineError Mapping
-requireMapping fs idx = do
-  maybeMapping <- fs.readMapping idx
+requireMapping ::
+  (IndexName -> IOE KengineError (Maybe Mapping)) ->
+  IndexName ->
+  IOE KengineError Mapping
+requireMapping readMapping idx = do
+  maybeMapping <- readMapping idx
   maybe
     (throwE $ FileError ("No mapping found for index: " <> unrefine idx))
     pure
@@ -89,7 +92,7 @@ createIndex' ::
   IndexName ->
   Mapping ->
   IOE KengineError IndexResponse
-createIndex' indexViewVar fs name mapping = do
+createIndex' indexViewVar FileStore{storeMapping} name mapping = do
   _ <- ExceptT $ TVar.atomically $ do
     indexView <- TVar.readTVar indexViewVar
     let validMapping =
@@ -99,7 +102,7 @@ createIndex' indexViewVar fs name mapping = do
     traverse
       (\idxData -> TVar.writeTVar indexViewVar (Map.insert name idxData indexView))
       newIndexTVar
-  fs.storeMapping name mapping
+  storeMapping name mapping
   pure IndexResponse{status = Created}
 
 indexDoc' ::
@@ -108,16 +111,17 @@ indexDoc' ::
   IndexName ->
   AE.Value ->
   IOE KengineError IndexResponse
-indexDoc' indexViewVar fs name jval = do
+indexDoc' indexViewVar FileStore{storeDoc} name jval = do
   idxView <- liftIO $ TVar.readTVarIO indexViewVar
   indexDataVar <- lookupIndex name idxView
   doc <- buildDoc indexDataVar jval
-  fs.storeDoc name doc
+  storeDoc name doc
   liftIO $ TVar.atomically $ do
-    idxData <- TVar.readTVar indexDataVar
-    let (updatedFieldIdx, updatedFieldMeta) = updateIndex idxData.memtable.fieldIdx idxData.memtable.fieldMeta doc
-    let updatedMemtable = idxData.memtable{fieldIdx = updatedFieldIdx, fieldMeta = updatedFieldMeta}
-    TVar.writeTVar indexDataVar idxData{memtable = updatedMemtable}
+    IndexData{mapping, memtable, segment} <- TVar.readTVar indexDataVar
+    let Memtable{fieldIdx, fieldMeta} = memtable
+    let (updatedFieldIdx, updatedFieldMeta) = updateIndex fieldIdx fieldMeta doc
+    let updatedMemtable = memtable{fieldIdx = updatedFieldIdx, fieldMeta = updatedFieldMeta}
+    TVar.writeTVar indexDataVar IndexData{mapping, memtable = updatedMemtable, segment}
   pure IndexResponse{status = Indexed}
 
 search' ::
@@ -126,19 +130,19 @@ search' ::
   IndexName ->
   Query ->
   IOE KengineError SearchResults
-search' indexViewVar fs name (Query query) = do
+search' indexViewVar FileStore{readDiskFieldIndex} name (Query query) = do
   idxView <- liftIO $ TVar.readTVarIO indexViewVar
   idxDataVar <- lookupIndex name idxView
-  idxData <- liftIO $ TVar.readTVarIO idxDataVar
+  IndexData{memtable = Memtable{docStore, fieldIdx, fieldMeta}, segment} <-
+    liftIO $ TVar.readTVarIO idxDataVar
   let qTokens = tokenize query
-  let offsets = resolveSparseIdx qTokens idxData.segment
-  fromFileInvertedIdx <- traverse (fs.readDiskFieldIndex name idxData.segment) offsets
+  let offsets = resolveSparseIdx qTokens segment
+  fromFileInvertedIdx <- traverse (readDiskFieldIndex name segment) offsets
   let completeFromFileIdx = foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty fromFileInvertedIdx
-  let completeFieldIndex = Map.unionWith (Map.unionWith Map.union) idxData.memtable.fieldIdx completeFromFileIdx
+  let completeFieldIndex = Map.unionWith (Map.unionWith Map.union) fieldIdx completeFromFileIdx
   pure $
     SearchResults
-      { results =
-          searchQ qTokens idxData.memtable.docStore completeFieldIndex idxData.memtable.fieldMeta
+      { results = searchQ qTokens docStore completeFieldIndex fieldMeta
       }
 
 flushState' :: TVar.TVar IndexView -> FileStore -> IOE KengineError ()
@@ -203,16 +207,17 @@ buildDoc ::
   TVar.TVar IndexData ->
   AE.Value ->
   IOE KengineError Document
-buildDoc indexDataVar doc = do
-  idxData <- liftIO $ TVar.readTVarIO indexDataVar
-  docToIndex <- ExceptT . pure $ parseDocument doc idxData.mapping
+buildDoc indexDataVar jval = do
+  IndexData{mapping = parseMapping} <- liftIO $ TVar.readTVarIO indexDataVar
+  docToIndex <- ExceptT . pure $ parseDocument jval parseMapping
   liftIO $ TVar.atomically $ do
-    freshIdxData <- TVar.readTVar indexDataVar
-    let hightestDocId = M.listToMaybe $ L.sortOn Down (Map.keys freshIdxData.memtable.docStore)
+    IndexData{mapping, memtable, segment} <- TVar.readTVar indexDataVar
+    let Memtable{docStore} = memtable
+    let hightestDocId = M.listToMaybe $ L.sortOn Down (Map.keys docStore)
     let nextDocId = maybe (DocId 1) (1 +) hightestDocId
     let newDoc = Document{docId = nextDocId, body = docToIndex}
-    let newDocStore = Map.insert nextDocId newDoc freshIdxData.memtable.docStore
+    let newDocStore = Map.insert nextDocId newDoc docStore
     TVar.writeTVar
       indexDataVar
-      freshIdxData{memtable = freshIdxData.memtable{docStore = newDocStore}}
+      IndexData{mapping, memtable = memtable{docStore = newDocStore}, segment}
     pure newDoc

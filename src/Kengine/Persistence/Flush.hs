@@ -16,38 +16,48 @@ import Kengine.Types (
 -- Flush the in-memory state of one index to disk and atomically swap the
 -- in-memory segment view to the new on-disk snapshot. Unsafe!
 flushSegment :: FileStore -> IndexName -> TVar.TVar IndexData -> IOE KengineError ()
-flushSegment fs idxName idxDataVar = do
-  idxData <- liftIO $ TVar.readTVarIO idxDataVar
-  diskFieldIdx <- fs.readSnapshotFieldIndex idxName
-  let maxPersistedDocId = M.maybe 0 fst (Map.lookupMax idxData.memtable.docStore)
-  let mergedFieldIdx =
-        Map.unionWith
-          (Map.unionWith Map.union)
-          idxData.memtable.fieldIdx
-          (M.fromMaybe Map.empty diskFieldIdx)
-  -- unsafe version, overwrites old snapshot
-  fs.writePendingSnapshot
-    idxName
-    (idxData.memtable.docStore, mergedFieldIdx, idxData.memtable.fieldMeta)
-  -- unsafe version, deletion of log entries
-  fs.truncateWAL idxName maxPersistedDocId
-  -- read new sparse index + fieldnames
-  (sparseIdx, fieldNames) <- fs.readPendingSnapshotSegment idxName
-  -- rename file,
-  fs.commitPendingSnapshot idxName
-  -- atomically:  replace sparse idx + fieldnames, cleanup in mem fieldIdx with exisiting entries (only keep newer maxdocid)
-  liftIO $ TVar.atomically $ do
-    freshIdxData <- TVar.readTVar idxDataVar
-    let prunedFieldIdx =
-          Map.filter (not . Map.null) $
-            Map.map
-              ( Map.filter (not . Map.null)
-                  . Map.map (Map.filterWithKey (\d _ -> d > maxPersistedDocId))
-              )
-              freshIdxData.memtable.fieldIdx
-    TVar.writeTVar
-      idxDataVar
-      freshIdxData
-        { memtable = freshIdxData.memtable{fieldIdx = prunedFieldIdx}
-        , segment = Segment sparseIdx fieldNames
-        }
+flushSegment
+  FileStore
+    { readSnapshotFieldIndex
+    , writePendingSnapshot
+    , truncateWAL
+    , readPendingSnapshotSegment
+    , commitPendingSnapshot
+    }
+  idxName
+  idxDataVar = do
+    IndexData{memtable = Memtable{docStore, fieldIdx, fieldMeta}} <-
+      liftIO $ TVar.readTVarIO idxDataVar
+    diskFieldIdx <- readSnapshotFieldIndex idxName
+    let maxPersistedDocId = M.maybe 0 fst (Map.lookupMax docStore)
+    let mergedFieldIdx =
+          Map.unionWith
+            (Map.unionWith Map.union)
+            fieldIdx
+            (M.fromMaybe Map.empty diskFieldIdx)
+    -- unsafe version, overwrites old snapshot
+    writePendingSnapshot idxName (docStore, mergedFieldIdx, fieldMeta)
+    -- unsafe version, deletion of log entries
+    truncateWAL idxName maxPersistedDocId
+    -- read new sparse index + fieldnames
+    (sparseIdx, fieldNames) <- readPendingSnapshotSegment idxName
+    -- rename file,
+    commitPendingSnapshot idxName
+    -- atomically:  replace sparse idx + fieldnames, cleanup in mem fieldIdx with exisiting entries (only keep newer maxdocid)
+    liftIO $ TVar.atomically $ do
+      IndexData{mapping, memtable = freshMemtable@Memtable{fieldIdx = freshFieldIdx}} <-
+        TVar.readTVar idxDataVar
+      let prunedFieldIdx =
+            Map.filter (not . Map.null) $
+              Map.map
+                ( Map.filter (not . Map.null)
+                    . Map.map (Map.filterWithKey (\d _ -> d > maxPersistedDocId))
+                )
+                freshFieldIdx
+      TVar.writeTVar
+        idxDataVar
+        IndexData
+          { mapping
+          , memtable = freshMemtable{fieldIdx = prunedFieldIdx}
+          , segment = Segment sparseIdx fieldNames
+          }

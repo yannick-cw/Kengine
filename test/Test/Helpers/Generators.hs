@@ -64,7 +64,9 @@ import Refined (Refined, refine)
 
 genValidMappingRequiredField :: Bool -> Gen Mapping
 genValidMappingRequiredField allRequired = do
-  fields <- Gen.nonEmpty (Range.linear 1 10) (genValidField allRequired)
+  fields <-
+    NE.nubBy (\a b -> a.fieldName == b.fieldName)
+      <$> Gen.nonEmpty (Range.linear 1 10) (genValidField allRequired)
   pure Mapping{fields}
 
 genValidMapping :: Gen Mapping

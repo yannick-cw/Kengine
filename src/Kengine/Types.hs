@@ -166,11 +166,11 @@ instance ToJSON Score where
 data SearchResult = SearchResult {doc :: Document, score :: Score}
   deriving stock (Show, Eq, Generic)
 instance ToJSON SearchResult where
-  toJSON sr =
+  toJSON SearchResult{doc = Document{docId, body}, score} =
     AE.object
-      [ "id" AE..= sr.doc.docId
-      , "score" AE..= sr.score
-      , "doc" AE..= Map.map unwrapFieldValue sr.doc.body
+      [ "id" AE..= docId
+      , "score" AE..= score
+      , "doc" AE..= Map.map unwrapFieldValue body
       ]
     where
       unwrapFieldValue :: FieldValue -> AE.Value
@@ -180,7 +180,4 @@ instance ToJSON SearchResult where
       unwrapFieldValue (NumberVal n) = toJSON n
 
 instance Ord SearchResult where
-  (<=) sr1 sr2 =
-    let Score s1 = sr1.score
-        Score s2 = sr2.score
-     in s1 <= s2
+  (<=) SearchResult{score = Score s1} SearchResult{score = Score s2} = s1 <= s2

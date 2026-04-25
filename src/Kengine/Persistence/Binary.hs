@@ -344,10 +344,9 @@ getSparseIndexEntry = do
   pure SparseIndexEntry{fieldId, token, firstBlockOffset}
 
 putDocument :: Document -> C.Put
-putDocument doc = do
-  let DocId dId = doc.docId
+putDocument Document{docId = DocId dId, body} = do
   C.putWord32be (fromIntegral dId)
-  let binBody = BS.toStrict $ B.encode doc.body
+  let binBody = BS.toStrict $ B.encode body
   C.putWord32be (fromIntegral $ BS.length binBody)
   C.putByteString binBody
 

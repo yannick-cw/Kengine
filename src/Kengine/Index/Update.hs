@@ -18,16 +18,15 @@ updateIndex ::
   FieldStats ->
   Document ->
   (FieldIndex, FieldStats)
-updateIndex fieldIndex fieldMeta doc =
+updateIndex fieldIndex fieldMeta Document{docId, body} =
   let
-    docId = doc.docId
     tokensPerField =
       Map.mapMaybe
         ( \case
             (TextVal txt) -> Just (tokenize txt)
             _ -> Nothing
         )
-        doc.body
+        body
     allMetadataPerField :: FieldStats
     allMetadataPerField = toPerFieldMetadata <$> tokensPerField
     -- simple union is enough - this is a new doc, the doc id can not exist yet
@@ -47,4 +46,4 @@ updateIndex fieldIndex fieldMeta doc =
     (mergedFields, mergedMeta)
   where
     toPerFieldMetadata :: [Token] -> Map.Map DocId DocFieldStats
-    toPerFieldMetadata tkns = Map.singleton doc.docId (DocFieldStats{totalTokens = length tkns})
+    toPerFieldMetadata tkns = Map.singleton docId (DocFieldStats{totalTokens = length tkns})

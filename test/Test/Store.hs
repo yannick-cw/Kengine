@@ -165,4 +165,4 @@ fieldValueToJSON (BoolVal b) = toJSON b
 fieldValueToJSON (NumberVal n) = toJSON n
 
 srToDoc :: SearchResults -> [Document]
-srToDoc sr = (.doc) <$> sr.results
+srToDoc SearchResults{results} = (\SearchResult{doc} -> doc) <$> results
