@@ -31,7 +31,9 @@ import Kengine.Types (
   IndexData (..),
   IndexName,
   Mapping,
+  Memtable (..),
   Offset (..),
+  Segment (..),
   SparseIndex,
  )
 import Refined (refineFail, unrefine)
@@ -55,10 +57,10 @@ data FileStore = FileStore
   , readIdxs :: IOE KengineError [IndexName]
   , storeDoc :: IndexName -> Document -> IOE KengineError ()
   , readDocs :: IndexName -> IOE KengineError [Document]
-  , unsafeFlushState :: IndexName -> IndexData -> IOE KengineError () -- if fails midway data is lost
+  , unsafeFlushState :: IndexName -> TVar.TVar IndexData -> IOE KengineError () -- if fails midway data is lost
   , readSnapshot ::
       IndexName -> IOE KengineError (DocStore, SparseIndex, FieldMetadata, [FieldName])
-  , readDiskFieldIndex :: IndexName -> [FieldName] -> Offset -> IOE KengineError FieldIndex
+  , readDiskFieldIndex :: IndexName -> Segment -> Offset -> IOE KengineError FieldIndex
   }
 
 mkFileStore :: IO FileStore
@@ -72,24 +74,22 @@ mkFileStore' dir =
     , readMapping = \idx -> readForIdxFile jsonDeCodec (pathToIdx dir idx </> "mapping.json")
     , storeDoc = \idx doc -> appendToFile jsonEnCodec dir idx "log.jsonl" doc
     , readDocs = readDocs dir
-    , -- TODO parts of this should be a higher level fn, just flush in here
-      unsafeFlushState = \idxName (IndexData _ docStoreVar fieldIndexVar metadataVar sparseIdxVar fieldNamesVar) -> do
+      unsafeFlushState = \idxName idxDataVar -> do
+        (IndexData _ memtable _) <- liftIO $ TVar.readTVarIO idxDataVar
         diskFieldIdx <- readForIdxFile fieldIndexDecode (pathToIdx dir idxName </> "snapshot.bin")
-        (docStore, fieldIndex, metadata) <- ExceptT $ TVar.atomically $ do
-          docStore <- TVar.readTVar docStoreVar
-          fieldIndex <- TVar.readTVar fieldIndexVar
-          metadata <- TVar.readTVar metadataVar
-          pure $ Right (docStore, fieldIndex, metadata)
-        let maxPersistedDocId = fst <$> Map.lookupMax docStore
+        let maxPersistedDocId = fst <$> Map.lookupMax memtable.docStore
         let mergedFieldIdxs =
-              Map.unionWith (Map.unionWith Map.union) fieldIndex (M.fromMaybe Map.empty diskFieldIdx)
+              Map.unionWith
+                (Map.unionWith Map.union)
+                memtable.fieldIdx
+                (M.fromMaybe Map.empty diskFieldIdx)
         -- unsafe version, overwrites old snapshot
         writeFullFile
           snapshotEnCodec
           dir
           idxName
           "snapshot.new.bin"
-          (docStore, mergedFieldIdxs, metadata)
+          (memtable.docStore, mergedFieldIdxs, memtable.fieldMeta)
         -- unsafe version, deletion of log entries
         walDocs <- readDocs dir idxName
         let truncatedDocs = filter (\d -> d.docId > M.fromMaybe 0 maxPersistedDocId) walDocs
@@ -105,22 +105,26 @@ mkFileStore' dir =
             (pathToIdx dir idxName </> "snapshot.bin")
         -- atomically:  replace sparse idx + fieldnames, cleanup in mem fieldIdx with exisiting entries (only keep newer maxdocid)
         liftIO $ TVar.atomically $ do
-          currentFieldIdx <- TVar.readTVar fieldIndexVar
+          (IndexData mapping freshMemtable _) <- TVar.readTVar idxDataVar
           let prunedFieldIdx =
                 Map.filter (not . Map.null) $
                   Map.map
                     ( Map.filter (not . Map.null)
                         . Map.map (Map.filterWithKey (\d _ -> d > M.fromMaybe 0 maxPersistedDocId))
                     )
-                    currentFieldIdx
-          TVar.writeTVar sparseIdxVar sparseIdx
-          TVar.writeTVar fieldNamesVar fieldNames
-          TVar.writeTVar fieldIndexVar prunedFieldIdx
+                    freshMemtable.fieldIdx
+          TVar.writeTVar
+            idxDataVar
+            ( IndexData
+                mapping
+                (freshMemtable{fieldIdx = prunedFieldIdx})
+                (Segment sparseIdx fieldNames)
+            )
     , readSnapshot = \idxName -> do
         s <- readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> "snapshot.bin")
         pure
           (M.maybe (Map.empty, Map.empty, Map.empty, []) (\(h, a, b, c) -> (a, b, c, h.fieldNames)) s)
-    , readDiskFieldIndex = \idxName fieldNames offset -> do
+    , readDiskFieldIndex = \idxName (Segment _ fieldNames) offset -> do
         let fieldNameLookup = Map.fromList $ zip [0 :: Word16 ..] fieldNames
         blockOfTokens <-
           readAtOffset blockDecode (pathToIdx dir idxName </> "snapshot.bin") offset

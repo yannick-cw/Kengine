@@ -150,11 +150,11 @@ searchQ tokenizedQ docStore fieldIndex fieldMeta =
         totalDocScore tf docId = idf * (tf * (1.2 + 1)) / (tf + 1.2 * (1 - 0.75 + 0.75 * (dl docId / avgdl docsMeta)))
 
 updateIndex ::
-  Document ->
   FieldIndex ->
   FieldMetadata ->
+  Document ->
   (FieldIndex, FieldMetadata)
-updateIndex (Document docId fieldNameToValue) fieldIndex fieldMeta =
+updateIndex fieldIndex fieldMeta (Document docId fieldNameToValue) =
   let
     tokensPerField =
       Map.mapMaybe

@@ -1,5 +1,7 @@
 module Kengine.Types (
   BM25 (..),
+  Memtable (..),
+  Segment (..),
   Mapping (..),
   FieldMetadata,
   SparseIndex,
@@ -70,21 +72,16 @@ type InvertedIndex = Map.Map Token (Map.Map DocId TermFrequency)
 type FieldIndex = Map.Map FieldName InvertedIndex
 type SparseIndex = Map.Map (FieldName, Token) Offset
 type DocStore = Map.Map DocId Document
-type IndexView = (Map.Map IndexName IndexData)
+type IndexView = (Map.Map IndexName (TVar.TVar IndexData))
 type FieldMetadata = Map.Map FieldName (Map.Map DocId MetaData)
 newtype MetaData = MetaData {totalTokens :: Int}
   deriving newtype (Eq, Num, Show)
   deriving stock (Generic)
 instance Binary MetaData
 
-data IndexData
-  = IndexData
-      Mapping
-      (TVar.TVar DocStore)
-      (TVar.TVar FieldIndex)
-      (TVar.TVar FieldMetadata)
-      (TVar.TVar SparseIndex)
-      (TVar.TVar [FieldName]) -- fieldnames present in the snapshot
+data Memtable = Memtable {docStore :: DocStore, fieldIdx :: FieldIndex, fieldMeta :: FieldMetadata}
+data Segment = Segment SparseIndex [FieldName]
+data IndexData = IndexData Mapping Memtable Segment
 
 -- Creation Types
 newtype Mapping = Mapping {fields :: L.NonEmpty Field} deriving stock (Eq, Show, Generic)
