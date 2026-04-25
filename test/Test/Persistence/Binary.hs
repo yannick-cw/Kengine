@@ -1,8 +1,8 @@
-module Test.Store.Binary (spec) where
+module Test.Persistence.Binary (spec) where
 
 import Data.Serialize qualified as C
 import Hedgehog (diff, forAll)
-import Kengine.Store.Binary (
+import Kengine.Persistence.Binary (
   decodeSnapshot,
   encodeState,
   getDocument,
@@ -17,6 +17,7 @@ import Kengine.Store.Binary (
   putTokenEntry,
  )
 import Kengine.Types (DocId (..), Document (..))
+
 import Test.Helpers.Generators (
   genDocForMapping,
   genFieldMeta,
@@ -46,7 +47,7 @@ spec = do
         (Right sparseIndex)
     it "roundtrips document" $ hedgehog $ do
       mapping <- forAll genValidMapping
-      doc <- forAll $ Document (DocId 1) <$> genDocForMapping mapping
+      doc <- forAll $ (\b -> Document{docId = DocId 1, body = b}) <$> genDocForMapping mapping
       diff (C.runGet getDocument (C.runPut $ putDocument doc)) (==) (Right doc)
     it "roundtrips field meta" $ hedgehog $ do
       fieldMeta <- forAll genFieldMeta

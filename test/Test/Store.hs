@@ -1,6 +1,6 @@
 {-# LANGUAGE TemplateHaskell #-}
 
-module Test.Store.InMemory (spec) where
+module Test.Store (spec) where
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (runExceptT)
@@ -14,8 +14,8 @@ import Hedgehog (annotateShow, diff, evalEither, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Kengine.Errors (IOE)
-import Kengine.Store.InMemory (Store (..), mkStore)
-import Kengine.Store.Persistence (FileStore (..), mkFileStore')
+import Kengine.Persistence.FileStore (mkFileStore')
+import Kengine.Store (Store (..), mkStore)
 import Kengine.Types (
   Document,
   Field (..),
@@ -33,19 +33,6 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Helpers.Generators (genDocForMapping, genValidIndexName, genValidMapping)
 import Test.Hspec (Spec, describe, it, shouldBe)
 import Test.Hspec.Hedgehog (hedgehog)
-
-emptyFileStore :: FileStore
-emptyFileStore =
-  FileStore
-    { storeMapping = \_ _ -> pure ()
-    , readMapping = \_ -> pure Nothing
-    , readIdxs = pure []
-    , storeDoc = \_ _ -> pure ()
-    , readDocs = \_ -> pure []
-    , unsafeFlushState = \_ _ -> pure ()
-    , readSnapshot = \_ -> undefined
-    , readDiskFieldIndex = \_ -> undefined
-    }
 
 fields :: NEL.NonEmpty Field
 fields =
@@ -153,15 +140,16 @@ spec = do
         (searchRes, noMatch) <-
           evalEither
             =<< liftIO
-              ( runExceptT $ do
-                  Store{createIndex, indexDoc, search, flushState} <- mkStore emptyFileStore
-                  _ <- createIndex idxName m
-                  for_ preFlush (indexDoc idxName)
-                  flushState
-                  for_ postFlush (indexDoc idxName)
-                  searchRes <- search idxName (Query query)
-                  noMatch <- search idxName notMatchingQuery
-                  pure (searchRes, noMatch)
+              ( withSystemTempDirectory "kengine-test" $ \dir ->
+                  runExceptT $ do
+                    Store{createIndex, indexDoc, search, flushState} <- mkStore (mkFileStore' dir)
+                    _ <- createIndex idxName m
+                    for_ preFlush (indexDoc idxName)
+                    flushState
+                    for_ postFlush (indexDoc idxName)
+                    searchRes <- search idxName (Query query)
+                    noMatch <- search idxName notMatchingQuery
+                    pure (searchRes, noMatch)
               )
 
         diff (length searchRes.results) (==) 1
@@ -177,4 +165,4 @@ fieldValueToJSON (BoolVal b) = toJSON b
 fieldValueToJSON (NumberVal n) = toJSON n
 
 srToDoc :: SearchResults -> [Document]
-srToDoc sr = (\(SearchResult d _) -> d) <$> sr.results
+srToDoc sr = (.doc) <$> sr.results

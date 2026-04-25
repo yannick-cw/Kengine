@@ -3,14 +3,14 @@ module Kengine.Types (
   Memtable (..),
   Segment (..),
   Mapping (..),
-  FieldMetadata,
+  FieldStats,
   SparseIndex,
-  Offset (..),
-  MetaData (..),
+  BlockLocation (..),
+  DocFieldStats (..),
   Field (..),
   SearchType (..),
-  FieldDocResult,
   FieldIndex,
+  PostingList,
   SearchResult (..),
   IndexName,
   Query (..),
@@ -18,10 +18,8 @@ module Kengine.Types (
   IndexResponseStatus (..),
   SearchResults (..),
   ValidName,
-  Term (..),
   DocId (..),
   Document (..),
-  fromDoc,
   Score (..),
   FieldValue (..),
   FieldName,
@@ -36,7 +34,6 @@ module Kengine.Types (
 import Data.Aeson (FromJSON (..), ToJSON (..), (.!=), (.:), (.:?))
 import Data.Aeson qualified as AE
 import Data.Bifunctor (first)
-import Data.Binary (Binary (..))
 import Data.Char (isAlphaNum)
 import Data.List.NonEmpty qualified as L
 import Data.Map qualified as Map
@@ -51,10 +48,8 @@ import Refined (
   Refined,
   displayRefineException,
   refine,
-  refineFail,
   success,
   throwRefineOtherException,
-  unrefine,
  )
 import Web.Scotty (Parsable (parseParam))
 
@@ -66,22 +61,26 @@ newtype BM25 = BM25 Float deriving newtype (Num, Eq, Show)
 newtype TermFrequency = TF Int
   deriving newtype (Num, Show, Eq)
   deriving stock (Generic)
-data Offset = Offset {firstByte :: Int, size :: Int} deriving stock (Show, Eq)
-instance Binary TermFrequency
-type InvertedIndex = Map.Map Token (Map.Map DocId TermFrequency)
+data BlockLocation = BlockLocation {firstByte :: Int, size :: Int}
+  deriving stock (Show, Eq)
+type PostingList = Map.Map DocId TermFrequency
+type InvertedIndex = Map.Map Token PostingList
 type FieldIndex = Map.Map FieldName InvertedIndex
-type SparseIndex = Map.Map (FieldName, Token) Offset
+type SparseIndex = Map.Map (FieldName, Token) BlockLocation
 type DocStore = Map.Map DocId Document
 type IndexView = (Map.Map IndexName (TVar.TVar IndexData))
-type FieldMetadata = Map.Map FieldName (Map.Map DocId MetaData)
-newtype MetaData = MetaData {totalTokens :: Int}
+type FieldStats = Map.Map FieldName (Map.Map DocId DocFieldStats)
+newtype DocFieldStats = DocFieldStats {totalTokens :: Int}
   deriving newtype (Eq, Num, Show)
   deriving stock (Generic)
-instance Binary MetaData
 
-data Memtable = Memtable {docStore :: DocStore, fieldIdx :: FieldIndex, fieldMeta :: FieldMetadata}
+data Memtable = Memtable {docStore :: DocStore, fieldIdx :: FieldIndex, fieldMeta :: FieldStats}
 data Segment = Segment SparseIndex [FieldName]
-data IndexData = IndexData Mapping Memtable Segment
+data IndexData = IndexData
+  { mapping :: Mapping
+  , memtable :: Memtable
+  , segment :: Segment
+  }
 
 -- Creation Types
 newtype Mapping = Mapping {fields :: L.NonEmpty Field} deriving stock (Eq, Show, Generic)
@@ -111,9 +110,6 @@ type FieldName = Refined ValidName Text
 type IndexName = Refined ValidName Text
 instance Parsable IndexName where
   parseParam = first (LT.pack . displayRefineException) . refine . LT.toStrict
-instance Binary FieldName where
-  put = put . unrefine
-  get = refineFail =<< get
 
 data ValidName
 instance Predicate ValidName Text where
@@ -140,21 +136,17 @@ instance ToJSON SearchResults
 newtype DocId = DocId Int
   deriving newtype (Eq, Ord, Num)
   deriving stock (Show, Generic)
-instance Binary DocId
 instance ToJSON DocId where
   toJSON (DocId i) = toJSON i
 instance FromJSON DocId where
   parseJSON v = DocId <$> parseJSON v
-newtype Term = Term Text
 
 newtype Token = Token Text
   deriving newtype (Show, Eq, Ord)
   deriving stock (Generic)
-instance Binary Token
 
 data Document = Document {docId :: DocId, body :: Map.Map FieldName FieldValue}
   deriving stock (Show, Eq, Generic)
-instance Binary Document
 instance ToJSON Document
 instance FromJSON Document
 instance Ord Document where
@@ -164,21 +156,21 @@ data FieldValue = TextVal Text | KeywordVal Text | BoolVal Bool | NumberVal Doub
   deriving stock (Show, Eq, Generic)
 instance FromJSON FieldValue
 instance ToJSON FieldValue
-instance Binary FieldValue
 
 newtype Score = Score Float
   deriving newtype (Show, Eq, Num)
   deriving stock (Generic)
 instance ToJSON Score where
   toJSON (Score s) = toJSON s
-data SearchResult = SearchResult Document Score
+
+data SearchResult = SearchResult {doc :: Document, score :: Score}
   deriving stock (Show, Eq, Generic)
 instance ToJSON SearchResult where
-  toJSON (SearchResult Document{docId, body} score) =
+  toJSON sr =
     AE.object
-      [ "id" AE..= docId
-      , "score" AE..= score
-      , "doc" AE..= Map.map unwrapFieldValue body
+      [ "id" AE..= sr.doc.docId
+      , "score" AE..= sr.score
+      , "doc" AE..= Map.map unwrapFieldValue sr.doc.body
       ]
     where
       unwrapFieldValue :: FieldValue -> AE.Value
@@ -188,9 +180,7 @@ instance ToJSON SearchResult where
       unwrapFieldValue (NumberVal n) = toJSON n
 
 instance Ord SearchResult where
-  (<=) (SearchResult _ (Score s1)) (SearchResult _ (Score s2)) = s1 <= s2
-
-type FieldDocResult = Map.Map DocId (FieldName, Score)
-
-fromDoc :: Score -> Document -> SearchResult
-fromDoc score doc = SearchResult doc score
+  (<=) sr1 sr2 =
+    let Score s1 = sr1.score
+        Score s2 = sr2.score
+     in s1 <= s2

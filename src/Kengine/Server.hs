@@ -1,12 +1,14 @@
-module Server (runServer, routes) where
+module Kengine.Server (runServer, routes) where
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (ExceptT, runExceptT)
 import Data.Aeson (ToJSON)
 import Data.Text.Lazy qualified as TL
-import Kengine.Store.InMemory (Store (..), mkStore)
-import Kengine.Store.Persistence (mkFileStore)
+import Kengine.Persistence.FileStore (mkFileStore)
+import Kengine.Store (Store (..), mkStore)
 import Network.HTTP.Types (status400)
+import System.Exit (exitFailure)
+import System.IO (hPutStrLn, stderr)
 import Web.Scotty (
   ActionM,
   get,
@@ -28,7 +30,9 @@ runServer = do
   dbStore <- runExceptT $ mkStore fileStore
   case dbStore of
     Right store -> scotty 3333 (routes store)
-    Left err -> print err
+    Left err -> do
+      hPutStrLn stderr ("Failed to start kengine: " <> show err)
+      exitFailure
 
 routes :: Store -> ScottyT IO ()
 routes Store{createIndex, indexDoc, search, flushState} = do

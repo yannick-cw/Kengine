@@ -77,14 +77,18 @@ library
     import:           warnings
 
     -- Modules exported by the library.
-    exposed-modules:  Server
+    exposed-modules:  Kengine.Server
                     , Kengine.Types
                     , Kengine.Errors
                     , Kengine.Mapping
-                    , Kengine.Engine
-                    , Kengine.Store.InMemory
-                    , Kengine.Store.Persistence
-                    , Kengine.Store.Binary
+                    , Kengine.Tokenize
+                    , Kengine.Search
+                    , Kengine.Index.Document
+                    , Kengine.Index.Update
+                    , Kengine.Store
+                    , Kengine.Persistence.FileStore
+                    , Kengine.Persistence.Binary
+                    , Kengine.Persistence.Flush
 
     -- Modules included in this library but not exported.
     other-modules:
@@ -148,11 +152,13 @@ test-suite kengine-test
     main-is:          Main.hs
     other-modules:    Test.Types
                     , Test.Mapping
-                    , Test.Engine
+                    , Test.Tokenize
+                    , Test.Search
+                    , Test.Index.Document
                     , Test.Helpers.Generators
-                    , Test.Store.InMemory
-                    , Test.Store.Persistence
-                    , Test.Store.Binary
+                    , Test.Store
+                    , Test.Persistence.FileStore
+                    , Test.Persistence.Binary
     build-depends:
         base ^>=4.21.0.0,
         kengine,

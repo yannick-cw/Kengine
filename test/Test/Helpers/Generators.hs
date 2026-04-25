@@ -35,24 +35,24 @@ import Data.Word (Word32)
 import Hedgehog (Gen)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import Kengine.Store.Binary (
+import Kengine.Persistence.Binary (
   FieldMeta (..),
   Header (..),
   SparseIndexEntry (..),
   TokenEntry (..),
  )
 import Kengine.Types (
+  DocFieldStats (..),
   DocId (DocId),
   DocStore,
   Document (..),
   Field (..),
   FieldIndex,
-  FieldMetadata,
   FieldName,
+  FieldStats,
   FieldValue (..),
   IndexName,
   Mapping (..),
-  MetaData (..),
   SearchType (..),
   TermFrequency (TF),
   Token (..),
@@ -218,7 +218,7 @@ genFieldMeta = do
   tokenCount <- genW32
   pure FieldMeta{fieldId, docId, tokenCount}
 
-genState :: Gen (DocStore, FieldIndex, FieldMetadata)
+genState :: Gen (DocStore, FieldIndex, FieldStats)
 genState = do
   mapping <- genValidMapping
   docs <- genDocsForMapping mapping
@@ -236,4 +236,4 @@ genState = do
       pure (tkn, postings)
     genMetaMap =
       Gen.map (Range.linear 1 5) $
-        (,) <$> genDocId <*> (MetaData <$> Gen.int (Range.linear 0 100))
+        (,) <$> genDocId <*> (DocFieldStats <$> Gen.int (Range.linear 0 100))

@@ -1,0 +1,50 @@
+module Kengine.Index.Update (updateIndex) where
+
+import Data.Map qualified as Map
+import Kengine.Tokenize (tokenize)
+import Kengine.Types (
+  DocFieldStats (..),
+  DocId,
+  Document (..),
+  FieldIndex,
+  FieldStats,
+  FieldValue (TextVal),
+  TermFrequency (TF),
+  Token,
+ )
+
+updateIndex ::
+  FieldIndex ->
+  FieldStats ->
+  Document ->
+  (FieldIndex, FieldStats)
+updateIndex fieldIndex fieldMeta doc =
+  let
+    docId = doc.docId
+    tokensPerField =
+      Map.mapMaybe
+        ( \case
+            (TextVal txt) -> Just (tokenize txt)
+            _ -> Nothing
+        )
+        doc.body
+    allMetadataPerField :: FieldStats
+    allMetadataPerField = toPerFieldMetadata <$> tokensPerField
+    -- simple union is enough - this is a new doc, the doc id can not exist yet
+    mergedMeta = Map.unionWith Map.union allMetadataPerField fieldMeta
+
+    -- takes FieldName -> [Token] and merges duplicates to create term frequency of
+    -- each token per field
+    newInvertedIndexForTouchedFields =
+      fmap (Map.singleton docId) . Map.fromListWith (+) . fmap (,TF 1) <$> tokensPerField
+
+    mergedFields =
+      Map.unionWith
+        (Map.unionWith Map.union)
+        newInvertedIndexForTouchedFields
+        fieldIndex
+   in
+    (mergedFields, mergedMeta)
+  where
+    toPerFieldMetadata :: [Token] -> Map.Map DocId DocFieldStats
+    toPerFieldMetadata tkns = Map.singleton doc.docId (DocFieldStats{totalTokens = length tkns})

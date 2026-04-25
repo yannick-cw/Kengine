@@ -1,4 +1,4 @@
-module Test.Store.Persistence (spec) where
+module Test.Persistence.FileStore (spec) where
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (runExceptT)
@@ -6,7 +6,7 @@ import Data.Foldable (traverse_)
 import Hedgehog (diff, evalEither, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import Kengine.Store.Persistence (FileStore (..), mkFileStore')
+import Kengine.Persistence.FileStore (FileStore (..), mkFileStore')
 import System.Directory (removeDirectoryRecursive)
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Helpers.Generators (
@@ -19,7 +19,7 @@ import Test.Hspec.Hedgehog (hedgehog)
 
 spec :: Spec
 spec = do
-  describe "Persistence" $ around (withSystemTempDirectory "kengine-test") $ do
+  describe "FileStore" $ around (withSystemTempDirectory "kengine-test") $ do
     it "roundtrip any mapping" $ \dir -> hedgehog $ do
       (idx, mapping) <-
         forAll ((,) <$> genValidIndexName <*> genValidMapping)

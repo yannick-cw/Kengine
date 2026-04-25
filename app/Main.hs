@@ -1,6 +1,6 @@
 module Main (main) where
 
-import Server (runServer)
+import Kengine.Server (runServer)
 
 main :: IO ()
 main = runServer

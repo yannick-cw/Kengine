@@ -5,7 +5,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Map qualified as Map
 import Data.Text (Text, intercalate)
 import Data.Text qualified as T
-import Kengine.Errors (KengineError (SearchError))
+import Kengine.Errors (KengineError (ValidationError))
 import Kengine.Types (
   Field (..),
   IndexName,
@@ -21,7 +21,7 @@ validateMapping ::
 validateMapping newIndexName existingNames mapping =
   mapping
     <$ first
-      (SearchError . intercalate " - " . NE.toList)
+      (ValidationError . intercalate " - " . NE.toList)
       (duplicatedField mapping <> mappingExists newIndexName existingNames)
 
 mappingExists :: IndexName -> [IndexName] -> Validated ()

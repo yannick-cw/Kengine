@@ -1,4 +1,6 @@
-module Kengine.Store.Binary (
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Kengine.Persistence.Binary (
   Header (..),
   decodeTokenEntry,
   putDocument,
@@ -9,7 +11,6 @@ module Kengine.Store.Binary (
   getSparseIndexEntry,
   putSparseIndexEntry,
   encodeState,
-  decodeState,
   getHeader,
   putTokenEntry,
   getTokenEntry,
@@ -20,7 +21,7 @@ module Kengine.Store.Binary (
 ) where
 
 import Control.Monad (replicateM, unless, void)
-import Data.Binary (Word16)
+import Data.Binary (Binary (..), Word16)
 import Data.Binary qualified as B
 import Data.ByteString qualified as BS
 import Data.Foldable (traverse_)
@@ -32,39 +33,73 @@ import Data.Serialize qualified as C
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Word (Word32, Word64, Word8)
 import Kengine.Types (
+  BlockLocation (..),
+  DocFieldStats (..),
   DocId (..),
   DocStore,
   Document (..),
   FieldIndex,
-  FieldMetadata,
   FieldName,
-  MetaData (..),
-  Offset (..),
+  FieldStats,
+  FieldValue,
   SparseIndex,
   TermFrequency (..),
   Token (..),
  )
 import Refined (refineFail, unrefine)
 
-encodeState :: DocStore -> FieldIndex -> FieldMetadata -> BS.ByteString
+instance Binary TermFrequency
+instance Binary DocFieldStats
+instance Binary DocId
+instance Binary Token
+instance Binary Document
+instance Binary FieldValue
+instance Binary FieldName where
+  put = put . unrefine
+  get = refineFail =<< get
+
+encodeState :: DocStore -> FieldIndex -> FieldStats -> BS.ByteString
 encodeState docStore fieldIndex metadata =
   let
     fieldNames = Map.keys fieldIndex
     fieldNameToId = Map.fromList $ zip fieldNames [0 :: Word16 ..]
     -- build header
-    nonOffsetHeader =
-      Header
-        { version = 1
-        , mappingVersion = 1
-        , docCount = fromIntegral $ length docStore
-        , fieldNames
-        , termSparseOffset = 0
-        , storedFieldsOffset = 0
-        , docMetadataOffset = 0
-        }
+    nonOffsetHeader = emptyHeader fieldNames (length docStore)
     -- measure header byte length
     headerOffset = BS.length $ C.runPut (putHeader nonOffsetHeader)
 
+    (tokenBlocksBytes, sparseIndex) = encodeTokenBlocks fieldNameToId fieldIndex
+    sparseIndexBytes = C.runPut $ traverse_ putSparseIndexEntry sparseIndex
+    documentBytes = encodeDocs docStore
+    metaBytes = encodeMetadata fieldNameToId metadata
+
+    termSparseOffset = fromIntegral $ headerOffset + BS.length tokenBlocksBytes
+    storedFieldsOffset = termSparseOffset + fromIntegral (BS.length sparseIndexBytes)
+    docMetadataOffset = storedFieldsOffset + fromIntegral (BS.length documentBytes)
+
+    finalHeader =
+      C.runPut $
+        putHeader
+          nonOffsetHeader{termSparseOffset, storedFieldsOffset, docMetadataOffset}
+   in
+    finalHeader <> tokenBlocksBytes <> sparseIndexBytes <> documentBytes <> metaBytes
+
+emptyHeader :: [FieldName] -> Int -> Header
+emptyHeader fieldNames docCount =
+  Header
+    { version = 1
+    , mappingVersion = 1
+    , docCount = fromIntegral docCount
+    , fieldNames
+    , termSparseOffset = 0
+    , storedFieldsOffset = 0
+    , docMetadataOffset = 0
+    }
+
+encodeTokenBlocks ::
+  Map.Map FieldName Word16 -> FieldIndex -> (BS.ByteString, [SparseIndexEntry])
+encodeTokenBlocks fieldNameToId fieldIndex =
+  let
     -- all token entries - flat - sorted by field + token
     tokenEntries = sortOn (\e -> (e.fieldId, e.token)) $ do
       (fieldName, tokensMap) <- Map.toList fieldIndex
@@ -73,109 +108,115 @@ encodeState docStore fieldIndex metadata =
     tokenGroups = nelChunksOf 128 tokenEntries
     tokenBlocks = C.runPut . void <$> fmap (traverse putTokenEntry) tokenGroups
     blockSizes = BS.length <$> tokenBlocks
-    termSparseOffset :: Word64 = fromIntegral $ headerOffset + sum blockSizes
     relativeOffsets = scanl (+) 0 blockSizes
-
     -- build sparse index, needs offsets from above per 128 entries
     sparseIndex =
       zipWith
-        ( \((TokenEntry{fieldId, token}) Nel.:| _) firstBlockOffset -> SparseIndexEntry{fieldId, token, firstBlockOffset}
+        ( \((TokenEntry{fieldId, token}) Nel.:| _) firstBlockOffset ->
+            SparseIndexEntry{fieldId, token, firstBlockOffset}
         )
         tokenGroups
         (fromIntegral <$> relativeOffsets)
-    sparseIndexBytes = C.runPut $ traverse_ putSparseIndexEntry sparseIndex
+   in
+    (BS.concat tokenBlocks, sparseIndex)
 
-    storedFieldsOffset = termSparseOffset + fromIntegral (BS.length sparseIndexBytes)
+encodeDocs :: DocStore -> BS.ByteString
+encodeDocs = C.runPut . traverse_ putDocument . sortOn (.docId) . Map.elems
 
-    documentBytes = C.runPut $ traverse_ putDocument (sortOn (.docId) (Map.elems docStore))
-
-    docMetadataOffset = storedFieldsOffset + fromIntegral (BS.length documentBytes)
-
+encodeMetadata :: Map.Map FieldName Word16 -> FieldStats -> BS.ByteString
+encodeMetadata fieldNameToId metadata =
+  let
     metaEntries = sortOn (.docId) $ do
       (fieldName, metaMap) <- Map.toList metadata
-      (docId, MetaData tokenCount) <- Map.toList metaMap
+      (docId, DocFieldStats tokenCount) <- Map.toList metaMap
       pure
         FieldMeta
           { fieldId = fieldNameToId Map.! fieldName
           , docId
           , tokenCount = fromIntegral tokenCount
           }
-    metaBytes = C.runPut $ traverse_ putFieldMeta metaEntries
-
-    finalHeader =
-      C.runPut $
-        putHeader
-          nonOffsetHeader{termSparseOffset, storedFieldsOffset, docMetadataOffset}
    in
-    finalHeader
-      <> BS.concat tokenBlocks
-      <> sparseIndexBytes
-      <> documentBytes
-      <> metaBytes
+    C.runPut $ traverse_ putFieldMeta metaEntries
 
 getMany :: C.Get a -> C.Get [a]
-getMany get = do
+getMany getOne = do
   atEnd <- C.isEmpty
   if atEnd
     then pure []
     else do
-      r <- get
-      rest <- getMany get
+      r <- getOne
+      rest <- getMany getOne
       pure $ r : rest
 
-decodeState ::
-  BS.ByteString -> Either String (Header, DocStore, SparseIndex, FieldMetadata)
-decodeState = fmap (\(h, a, _, c, d) -> (h, a, c, d)) . decodeSnapshot
-
 decodeSnapshot ::
-  BS.ByteString -> Either String (Header, DocStore, FieldIndex, SparseIndex, FieldMetadata)
-decodeSnapshot bytes =
+  BS.ByteString -> Either String (Header, DocStore, FieldIndex, SparseIndex, FieldStats)
+decodeSnapshot = C.runGet $ do
+  header <- getHeader
+  headerSize <- C.bytesRead
+  let tokenSectionSize = fromIntegral header.termSparseOffset - headerSize
+  tokenEntries <- C.isolate tokenSectionSize (getMany getTokenEntry)
+  headerAndEntrySize <- C.bytesRead
+  let sparseIndexSize = fromIntegral header.storedFieldsOffset - headerAndEntrySize
+  sparseEntries <- C.isolate sparseIndexSize (getMany getSparseIndexEntry)
+  docs <- replicateM (fromIntegral header.docCount) getDocument
+  meta <- getMany getFieldMeta
+  pure
+    ( header
+    , buildDocStore docs
+    , buildFieldIndex header tokenEntries
+    , buildSparseIndex header headerSize tokenSectionSize sparseEntries
+    , buildFieldStats header meta
+    )
+
+buildDocStore :: [Document] -> DocStore
+buildDocStore docs = Map.fromList $ (\d -> (d.docId, d)) <$> docs
+
+buildFieldIndex :: Header -> [TokenEntry] -> FieldIndex
+buildFieldIndex header tokenEntries =
+  foldl'
+    (Map.unionWith (Map.unionWith Map.union))
+    Map.empty
+    ( ( \e ->
+          Map.singleton
+            (header.fieldNames !! fromIntegral e.fieldId)
+            (Map.singleton e.token (Map.fromList e.docs))
+      )
+        <$> tokenEntries
+    )
+
+buildFieldStats :: Header -> [FieldMeta] -> FieldStats
+buildFieldStats header meta =
+  foldl'
+    (Map.unionWith Map.union)
+    Map.empty
+    ( ( \e ->
+          Map.singleton
+            (header.fieldNames !! fromIntegral e.fieldId)
+            (Map.singleton e.docId (DocFieldStats $ fromIntegral e.tokenCount))
+      )
+        <$> meta
+    )
+
+buildSparseIndex :: Header -> Int -> Int -> [SparseIndexEntry] -> SparseIndex
+buildSparseIndex header headerSize tokenSectionSize sparseEntries =
   let
-    get = C.runGet $ do
-      header <- getHeader
-      headerSize <- C.bytesRead
-      let tokenEntrySize = fromIntegral header.termSparseOffset - headerSize
-      tokenEntries <- C.isolate tokenEntrySize (getMany getTokenEntry)
-      headerAndEntrySize <- C.bytesRead
-      let sparseIndexSize = fromIntegral header.storedFieldsOffset - headerAndEntrySize
-      sparseEntries <- C.isolate sparseIndexSize (getMany getSparseIndexEntry)
-      docs <- replicateM (fromIntegral header.docCount) getDocument
-      meta <- getMany getFieldMeta
-      let docStore = Map.fromList $ (\d -> (d.docId, d)) <$> docs
-      let inveretdIndexes =
-            ( \e ->
-                Map.singleton
-                  (header.fieldNames !! fromIntegral e.fieldId)
-                  (Map.singleton e.token (Map.fromList e.docs))
+    -- these are all the endpoints for each block, I drop the first offset and add the tokenEntrySize as last byte
+    nextRelativeOffset =
+      drop 1 $ ((.firstBlockOffset) <$> sparseEntries) ++ [fromIntegral tokenSectionSize]
+    sparseIndexes =
+      ( \(e, nextBlockStart) ->
+          Map.singleton
+            (header.fieldNames !! fromIntegral e.fieldId, e.token)
+            -- we convert the relative block offsets to absolute offsets
+            ( BlockLocation
+                { firstByte = fromIntegral (e.firstBlockOffset + fromIntegral headerSize)
+                , size = fromIntegral (nextBlockStart - e.firstBlockOffset)
+                }
             )
-              <$> tokenEntries
-      let fieldIndex = foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty inveretdIndexes
-      let fieldMetas =
-            ( \e ->
-                Map.singleton
-                  (header.fieldNames !! fromIntegral e.fieldId)
-                  (Map.singleton e.docId (MetaData $ fromIntegral e.tokenCount))
-            )
-              <$> meta
-      let fieldMeta = foldl' (Map.unionWith Map.union) Map.empty fieldMetas
-      -- these are all the endpoints for each block, I drop the first offset and add the tokenEntrySize as last byte
-      let nextRelativeOffset = drop 1 $ ((.firstBlockOffset) <$> sparseEntries) ++ [fromIntegral tokenEntrySize]
-      let sparseIndexes =
-            ( \(e, nextBlockStart) ->
-                Map.singleton
-                  (header.fieldNames !! fromIntegral e.fieldId, e.token)
-                  -- we convert the relative block offsets to absolute offsets
-                  ( Offset
-                      { firstByte = fromIntegral (e.firstBlockOffset + fromIntegral headerSize)
-                      , size = fromIntegral (nextBlockStart - e.firstBlockOffset)
-                      }
-                  )
-            )
-              <$> zip sparseEntries nextRelativeOffset
-      let sparseIndex = foldl' Map.union Map.empty sparseIndexes
-      pure (header, docStore, fieldIndex, sparseIndex, fieldMeta)
+      )
+        <$> zip sparseEntries nextRelativeOffset
    in
-    get bytes
+    foldl' Map.union Map.empty sparseIndexes
 
 decodeTokenEntry :: BS.ByteString -> Either String [TokenEntry]
 decodeTokenEntry = C.runGet (getMany getTokenEntry)
@@ -303,9 +344,10 @@ getSparseIndexEntry = do
   pure SparseIndexEntry{fieldId, token, firstBlockOffset}
 
 putDocument :: Document -> C.Put
-putDocument (Document (DocId dId) body) = do
+putDocument doc = do
+  let DocId dId = doc.docId
   C.putWord32be (fromIntegral dId)
-  let binBody = BS.toStrict $ B.encode body
+  let binBody = BS.toStrict $ B.encode doc.body
   C.putWord32be (fromIntegral $ BS.length binBody)
   C.putByteString binBody
 
