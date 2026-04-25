@@ -28,7 +28,6 @@ import Kengine.Types (
   InvertedIndex,
   Mapping (..),
   MetaData (..),
-  Query (..),
   Score (Score),
   SearchResult,
   Term (..),
@@ -81,12 +80,12 @@ docParser fields obj =
     Map.fromList . M.catMaybes . toList <$> parsedFieldVals
 
 searchQ ::
-  Query ->
+  [Token] ->
   DocStore ->
   FieldIndex ->
   FieldMetadata ->
   [SearchResult]
-searchQ (Query query) docStore fieldIndex fieldMeta =
+searchQ tokenizedQ docStore fieldIndex fieldMeta =
   let
     -- each entry is one map of docs of scores for one field
     perFieldResults :: [Map.Map DocId Score]
@@ -99,7 +98,6 @@ searchQ (Query query) docStore fieldIndex fieldMeta =
     searchOneField :: FieldName -> InvertedIndex -> Map.Map DocId Score
     searchOneField fName invertedIndex =
       let
-        tokenizedQ = tokenize $ Term query
         metadataForFieldname :: Map.Map DocId MetaData
         metadataForFieldname = Map.findWithDefault Map.empty fName fieldMeta
 

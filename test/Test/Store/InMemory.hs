@@ -44,84 +44,123 @@ emptyFileStore =
     , readDocs = \_ -> pure []
     , unsafeFlushState = \_ _ -> pure ()
     , readSnapshot = \_ -> undefined
+    , readDiskFieldIndex = \_ -> undefined
     }
+
+fields :: NEL.NonEmpty Field
+fields =
+  Field{sType = K.Text, fieldName = $$(R.refineTH "some_text"), required = True}
+    NEL.:| [Field{sType = K.Text, fieldName = $$(R.refineTH "other_field"), required = True}]
+mapping :: Mapping
+mapping = Mapping{fields}
+indexName :: IndexName
+indexName :: IndexName = $$(R.refineTH "test-index")
+doc1 :: AE.Value
+doc1 =
+  AE.object
+    [ "some_text" AE..= ("these terms are in both" :: Text)
+    , "other_field" AE..= ("apple" :: Text)
+    ]
+doc2 :: AE.Value
+doc2 =
+  AE.object
+    [ "some_text" AE..= ("these terms are in both" :: Text)
+    , "other_field" AE..= ("banana" :: Text)
+    ]
+doc3 :: AE.Value
+doc3 =
+  AE.object
+    [ "some_text" AE..= ("this is new" :: Text)
+    , "other_field" AE..= ("ok" :: Text)
+    ]
 
 spec :: Spec
 spec = do
   describe "Store for search" $ do
     it "works e2e" $ withSystemTempDirectory "kengine-test" $ \dir -> do
-      let store = mkFileStore' dir
-      let fields =
-            Field{sType = K.Text, fieldName = $$(R.refineTH "some_text"), required = True}
-              NEL.:| [Field{sType = K.Text, fieldName = $$(R.refineTH "other_field"), required = True}]
-      let mapping = Mapping{fields}
-      let indexName :: IndexName = $$(R.refineTH "test-index")
-      let doc1 =
-            AE.object
-              [ "some_text" AE..= ("these terms are in both" :: Text)
-              , "other_field" AE..= ("apple" :: Text)
-              ]
-      let doc2 =
-            AE.object
-              [ "some_text" AE..= ("these terms are in both" :: Text)
-              , "other_field" AE..= ("banana" :: Text)
-              ]
-      let doc3 =
-            AE.object
-              [ "some_text" AE..= ("this is new" :: Text)
-              , "other_field" AE..= ("ok" :: Text)
-              ]
+      let fileStore = mkFileStore' dir
       runIOE $ do
-        Store{createIndex, indexDoc, search} <- mkStore store
+        Store{createIndex, indexDoc, search, flushState} <- mkStore fileStore
         _ <- createIndex indexName mapping
         for_ [doc1, doc2] (indexDoc indexName)
         searchRes <- search indexName (Query "these terms are in both")
         bananaDoc <- search indexName (Query "banana")
         -- search terms match AND per field - cross field gives no match
         nonMatch <- search indexName (Query "banana term")
-        Store{search = fresSearch, flushState} <- mkStore store
-        searchResAfterRestart <- fresSearch indexName (Query "these terms are in both")
-        bananaDocAfterRestart <- fresSearch indexName (Query "banana")
         flushState
         indexDoc indexName doc3
-        Store{search = afterCompactSearch} <- mkStore store
-        searchResAfterFlush <- afterCompactSearch indexName (Query "these terms are in both")
-        bananaDocAfterFlush <- afterCompactSearch indexName (Query "banana")
-        doc3Match <- afterCompactSearch indexName (Query "this is new")
+        searchResAfterFlush <- search indexName (Query "these terms are in both")
+        bananaDocAfterFlush <- search indexName (Query "banana")
+        doc3Match <- search indexName (Query "this is new")
         liftIO $ length searchRes.results `shouldBe` 2
         liftIO $ length bananaDoc.results `shouldBe` 1
         liftIO $ length nonMatch.results `shouldBe` 0
-        liftIO $ searchRes `shouldBe` searchResAfterRestart
-        liftIO $ bananaDoc `shouldBe` bananaDocAfterRestart
-        -- only compare docs, store is different with third doc in the mix
+        -- flush shouldn't change results for the pre-flush docs
         liftIO $ srToDoc searchRes `shouldBe` srToDoc searchResAfterFlush
         liftIO $ srToDoc bananaDoc `shouldBe` srToDoc bananaDocAfterFlush
         liftIO $ length doc3Match.results `shouldBe` 1
 
+    it "finds indexed docs from before and after flushing (single store, live swap)" $
+      withSystemTempDirectory "kengine-test" $ \dir -> do
+        let fileStore = mkFileStore' dir
+        runIOE $ do
+          store <- mkStore fileStore
+          _ <- store.createIndex indexName mapping
+          store.indexDoc indexName doc1
+          firstDocBeforeFlush <- store.search indexName (Query "these terms are in both")
+          store.flushState
+          store.indexDoc indexName doc2
+          bothDocsAfterFlush <- store.search indexName (Query "these terms are in both")
+          store.flushState
+          bothDocsAfterSndFlush <- store.search indexName (Query "these terms are in both")
+          liftIO $ length firstDocBeforeFlush.results `shouldBe` 1
+          liftIO $ length bothDocsAfterFlush.results `shouldBe` 2
+          liftIO $ length bothDocsAfterSndFlush.results `shouldBe` 2
+
+    it "recovers indexed docs across restarts" $
+      withSystemTempDirectory "kengine-test" $ \dir -> do
+        let fileStore = mkFileStore' dir
+        runIOE $ do
+          store1 <- mkStore fileStore
+          _ <- store1.createIndex indexName mapping
+          store1.indexDoc indexName doc1
+          store1.flushState
+          store2 <- mkStore fileStore
+          store2.indexDoc indexName doc2
+          store2.flushState
+          store3 <- mkStore fileStore
+          bothDocs <- store3.search indexName (Query "these terms are in both")
+          liftIO $ length bothDocs.results `shouldBe` 2
+
     it "only find the doc if it includes the full query (AND query tokens)" $ do
       hedgehog $ do
-        indexName <- forAll genValidIndexName
+        idxName <- forAll genValidIndexName
         let fieldName :: FieldName = $$(R.refineTH "some_text")
-        mapping <-
+        m <-
           forAll $
             (\m -> m{fields = Field{sType = K.Text, fieldName, required = True} NEL.<| m.fields})
               <$> genValidMapping
-        fields : rest <-
-          forAll $ Gen.list (Range.linear 1 100) (genDocForMapping mapping)
+        fns : rest <-
+          forAll $ Gen.list (Range.linear 1 100) (genDocForMapping m)
         let query = "test query"
         let notMatchingQuery = Query "test query extraTkn"
-        let fstDocWithQuery = Map.adjust (\_ -> TextVal query) fieldName fields
+        let fstDocWithQuery = Map.adjust (\_ -> TextVal query) fieldName fns
         let allDocs = toJSON . fmap fieldValueToJSON <$> (fstDocWithQuery : rest)
+        shuffled <- forAll $ Gen.shuffle allDocs
+        splitIdx <- forAll $ Gen.int (Range.linear 0 (length shuffled))
+        let (preFlush, postFlush) = splitAt splitIdx shuffled
         annotateShow allDocs
         (searchRes, noMatch) <-
           evalEither
             =<< liftIO
               ( runExceptT $ do
-                  Store{createIndex, indexDoc, search} <- mkStore emptyFileStore
-                  _ <- createIndex indexName mapping
-                  for_ allDocs (indexDoc indexName)
-                  searchRes <- search indexName (Query query)
-                  noMatch <- search indexName notMatchingQuery
+                  Store{createIndex, indexDoc, search, flushState} <- mkStore emptyFileStore
+                  _ <- createIndex idxName m
+                  for_ preFlush (indexDoc idxName)
+                  flushState
+                  for_ postFlush (indexDoc idxName)
+                  searchRes <- search idxName (Query query)
+                  noMatch <- search idxName notMatchingQuery
                   pure (searchRes, noMatch)
               )
 

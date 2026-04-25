@@ -2,6 +2,8 @@ module Kengine.Types (
   BM25 (..),
   Mapping (..),
   FieldMetadata,
+  SparseIndex,
+  Offset (..),
   MetaData (..),
   Field (..),
   SearchType (..),
@@ -62,9 +64,11 @@ newtype BM25 = BM25 Float deriving newtype (Num, Eq, Show)
 newtype TermFrequency = TF Int
   deriving newtype (Num, Show, Eq)
   deriving stock (Generic)
+data Offset = Offset {firstByte :: Int, size :: Int} deriving stock (Show, Eq)
 instance Binary TermFrequency
 type InvertedIndex = Map.Map Token (Map.Map DocId TermFrequency)
 type FieldIndex = Map.Map FieldName InvertedIndex
+type SparseIndex = Map.Map (FieldName, Token) Offset
 type DocStore = Map.Map DocId Document
 type IndexView = (Map.Map IndexName IndexData)
 type FieldMetadata = Map.Map FieldName (Map.Map DocId MetaData)
@@ -74,7 +78,13 @@ newtype MetaData = MetaData {totalTokens :: Int}
 instance Binary MetaData
 
 data IndexData
-  = IndexData Mapping (TVar.TVar DocStore) (TVar.TVar FieldIndex) (TVar.TVar FieldMetadata)
+  = IndexData
+      Mapping
+      (TVar.TVar DocStore)
+      (TVar.TVar FieldIndex)
+      (TVar.TVar FieldMetadata)
+      (TVar.TVar SparseIndex)
+      (TVar.TVar [FieldName]) -- fieldnames present in the snapshot
 
 -- Creation Types
 newtype Mapping = Mapping {fields :: L.NonEmpty Field} deriving stock (Eq, Show, Generic)

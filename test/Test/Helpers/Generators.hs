@@ -1,7 +1,7 @@
 module Test.Helpers.Generators (
   genValidMappingRequiredField,
   genFieldMeta,
-  genSparseIndex,
+  genSparseIndexEntry,
   genTokenEntry,
   genValidMapping,
   genValidField,
@@ -38,7 +38,7 @@ import Hedgehog.Range qualified as Range
 import Kengine.Store.Binary (
   FieldMeta (..),
   Header (..),
-  SparseIndex (..),
+  SparseIndexEntry (..),
   TokenEntry (..),
  )
 import Kengine.Types (
@@ -204,12 +204,12 @@ genTokenEntry = do
   docs <- Gen.list (Range.linear 1 100) ((,) <$> genDocId <*> genTF)
   pure TokenEntry{fieldId, token, docs}
 
-genSparseIndex :: Gen SparseIndex
-genSparseIndex = do
+genSparseIndexEntry :: Gen SparseIndexEntry
+genSparseIndexEntry = do
   fieldId <- Gen.word16 (Range.linear 0 1000)
   token <- Token <$> genText
   firstBlockOffset <- Gen.word64 (Range.linear 1 10000)
-  pure SparseIndex{fieldId, token, firstBlockOffset}
+  pure SparseIndexEntry{fieldId, token, firstBlockOffset}
 
 genFieldMeta :: Gen FieldMeta
 genFieldMeta = do

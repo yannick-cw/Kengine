@@ -28,7 +28,6 @@ import Kengine.Types (
   FieldName,
   FieldValue (BoolVal, KeywordVal, NumberVal, TextVal),
   MetaData (MetaData),
-  Query (..),
   Score (..),
   SearchResult (..),
   Term (..),
@@ -138,7 +137,7 @@ searchSpec = do
           Map.singleton
             fieldName
             (Map.fromList [(DocId 1, MetaData 5), (DocId 2, MetaData 10)])
-        searchRes = searchQ (Query "test") docStore fieldIndex fieldMeta
+        searchRes = searchQ [Token "test"] docStore fieldIndex fieldMeta
         idf = log ((2 - 2 + 0.5) / (2 + 0.5) + 1)
         doc1 = idf * (10 * (1.2 + 1)) / (10 + 1.2 * (1 - 0.75 + 0.75 * (5 / 7.5)))
         doc2 = idf * (5 * (1.2 + 1)) / (5 + 1.2 * (1 - 0.75 + 0.75 * (10 / 7.5)))
@@ -162,7 +161,7 @@ searchSpec = do
           Map.singleton
             fieldName
             (Map.fromList [(DocId 1, MetaData 5), (DocId 2, MetaData 10)])
-        searchRes = searchQ (Query "and test") docStore fieldIndex fieldMeta
+        searchRes = searchQ [Token "and", Token "test"] docStore fieldIndex fieldMeta
        in
         length searchRes `shouldBe` 1
 

@@ -3,17 +3,17 @@ module Test.Store.Binary (spec) where
 import Data.Serialize qualified as C
 import Hedgehog (diff, forAll)
 import Kengine.Store.Binary (
-  decodeState,
+  decodeSnapshot,
   encodeState,
   getDocument,
   getFieldMeta,
   getHeader,
-  getSparseIndex,
+  getSparseIndexEntry,
   getTokenEntry,
   putDocument,
   putFieldMeta,
   putHeader,
-  putSparseIndex,
+  putSparseIndexEntry,
   putTokenEntry,
  )
 import Kengine.Types (DocId (..), Document (..))
@@ -21,7 +21,7 @@ import Test.Helpers.Generators (
   genDocForMapping,
   genFieldMeta,
   genHeader,
-  genSparseIndex,
+  genSparseIndexEntry,
   genState,
   genTokenEntry,
   genValidMapping,
@@ -39,9 +39,9 @@ spec = do
       tknEntry <- forAll genTokenEntry
       diff (C.runGet getTokenEntry (C.runPut $ putTokenEntry tknEntry)) (==) (Right tknEntry)
     it "roundtrips the sparse index" $ hedgehog $ do
-      sparseIndex <- forAll genSparseIndex
+      sparseIndex <- forAll genSparseIndexEntry
       diff
-        (C.runGet getSparseIndex (C.runPut $ putSparseIndex sparseIndex))
+        (C.runGet getSparseIndexEntry (C.runPut $ putSparseIndexEntry sparseIndex))
         (==)
         (Right sparseIndex)
     it "roundtrips document" $ hedgehog $ do
@@ -54,6 +54,9 @@ spec = do
     it "roundtrips whole state" $ hedgehog $ do
       (docStore, fieldIndex, metadata) <- forAll genState
       diff
-        (decodeState (encodeState docStore fieldIndex metadata))
+        -- ignoring sparse index + header, derived struture
+        ( (\(_, a, b, _, d) -> (a, b, d))
+            <$> decodeSnapshot (encodeState docStore fieldIndex metadata)
+        )
         (==)
         (Right (docStore, fieldIndex, metadata))

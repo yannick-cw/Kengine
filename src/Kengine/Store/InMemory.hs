@@ -10,7 +10,7 @@ import Data.Maybe qualified as M
 import Data.Ord (Down (Down))
 import Data.Text qualified as T
 import GHC.Conc qualified as TVar
-import Kengine.Engine (parseDocument, searchQ, updateIndex)
+import Kengine.Engine (parseDocument, searchQ, tokenize, updateIndex)
 import Kengine.Errors (IOE, KengineError (FileError, SearchError))
 import Kengine.Mapping (validateMapping)
 import Kengine.Store.Persistence (FileStore (..))
@@ -20,14 +20,19 @@ import Kengine.Types (
   Document (..),
   FieldIndex,
   FieldMetadata,
+  FieldName,
   IndexData (..),
   IndexName,
   IndexResponse (..),
   IndexResponseStatus (..),
   IndexView,
   Mapping (..),
-  Query,
+  Offset,
+  Query (..),
   SearchResults (..),
+  SparseIndex,
+  Term (..),
+  Token,
  )
 import Refined (unrefine)
 import Validation qualified as V (validationToEither)
@@ -49,6 +54,7 @@ mkStore
     , storeDoc
     , readSnapshot
     , unsafeFlushState
+    , readDiskFieldIndex
     } = do
     allIndexes <- readIdxs
     liftIO $
@@ -77,19 +83,28 @@ mkStore
             pure response
         , indexDoc = \name jval -> do
             idxView <- liftIO $ TVar.readTVarIO indexViewVar
-            (IndexData mapping docStoreVar invertedIndexVar fieldMetaDataVar) <-
+            (IndexData mapping docStoreVar invertedIndexVar fieldMetaDataVar _ _) <-
               lookupIndex name idxView
             doc <- indexDoc mapping docStoreVar jval
             storeDoc name doc
             liftIO $ TVar.atomically (storeTokens invertedIndexVar fieldMetaDataVar doc)
             pure IndexResponse{status = Indexed}
-        , search = \name query -> do
+        , search = \name (Query query) -> do
             idxView <- liftIO $ TVar.readTVarIO indexViewVar
-            (IndexData _ docStoreVar fieldIndexVar fieldMetaDataVar) <- lookupIndex name idxView
-            fieldIndex <- liftIO $ TVar.readTVarIO fieldIndexVar
+            (IndexData _ docStoreVar memtableVar fieldMetaDataVar sparseIdxVar persistedFieldNamesVar) <-
+              lookupIndex name idxView
+            inMemFieldIndex <- liftIO $ TVar.readTVarIO memtableVar
             docStore <- liftIO $ TVar.readTVarIO docStoreVar
             fieldMetadata <- liftIO $ TVar.readTVarIO fieldMetaDataVar
-            pure $ SearchResults{results = searchQ query docStore fieldIndex fieldMetadata}
+            persistedFieldNames <- liftIO $ TVar.readTVarIO persistedFieldNamesVar
+            sparseIdx <- liftIO $ TVar.readTVarIO sparseIdxVar
+            let qTokens = tokenize (Term query)
+            let offsets = resolveSparseIdx persistedFieldNames qTokens sparseIdx
+            fromFileInvertedIdx <- traverse (readDiskFieldIndex name persistedFieldNames) offsets
+            let completeFromFileIdx = foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty fromFileInvertedIdx
+            let completeFieldIndex = Map.unionWith (Map.unionWith Map.union) inMemFieldIndex completeFromFileIdx
+            pure $
+              SearchResults{results = searchQ qTokens docStore completeFieldIndex fieldMetadata}
         , flushState = do
             idxView <- liftIO $ TVar.readTVarIO indexViewVar
             _ <- Map.traverseWithKey unsafeFlushState idxView
@@ -103,6 +118,16 @@ lookupIndex name indexView =
       (Left $ SearchError ("No index found: " <> unrefine name))
       Right
       (Map.lookup name indexView)
+
+resolveSparseIdx :: [FieldName] -> [Token] -> SparseIndex -> [Offset]
+resolveSparseIdx persistedFieldNames tkns idx =
+  snd
+    <$> M.catMaybes
+      ( do
+          fn <- persistedFieldNames
+          tkn <- tkns
+          pure $ Map.lookupLE (fn, tkn) idx
+      )
 
 createIndex ::
   TVar.TVar IndexView ->
@@ -123,25 +148,40 @@ createIndex indexViewVar name mapping = do
 createEmptyIdxData :: Mapping -> TVar.STM IndexData
 createEmptyIdxData validMapping = do
   docStoreVar <- TVar.newTVar Map.empty
-  fieldIndexVar <- TVar.newTVar Map.empty
+  memtableVar <- TVar.newTVar Map.empty
   fieldMetadataVar <- TVar.newTVar Map.empty
-  pure $ IndexData validMapping docStoreVar fieldIndexVar fieldMetadataVar
+  sparseIdxVar <- TVar.newTVar Map.empty
+  fieldNamesVar <- TVar.newTVar []
+  pure $
+    IndexData validMapping docStoreVar memtableVar fieldMetadataVar sparseIdxVar fieldNamesVar
 
 createInitialIdxData ::
-  Mapping -> (DocStore, FieldIndex, FieldMetadata) -> [Document] -> TVar.STM IndexData
-createInitialIdxData validMapping (docsFromSnapshot, fieldIdx, fieldMeta) docs = do
+  Mapping ->
+  (DocStore, SparseIndex, FieldMetadata, [FieldName]) ->
+  [Document] ->
+  TVar.STM IndexData
+createInitialIdxData validMapping (docsFromSnapshot, sparseIndex, fieldMeta, fieldNames) docsFromLog = do
   docStoreVar <-
     TVar.newTVar $ Map.union docsFromSnapshot docsFromAppendLog
-  fieldIndexVar <- TVar.newTVar fieldIdx
+  memtableVar <- TVar.newTVar Map.empty
   fieldMetadataVar <- TVar.newTVar fieldMeta
+  sparseIndexVar <- TVar.newTVar sparseIndex
+  fieldNamesVar <- TVar.newTVar fieldNames
   -- this should in practice just be `docsFromAppendLog` - but in case of crash
   -- append log docs would have not been cleaned up
   let docsNewerThanSnapshot = Map.difference docsFromAppendLog docsFromSnapshot
-  traverse_ (storeTokens fieldIndexVar fieldMetadataVar) docsNewerThanSnapshot
-  pure $ IndexData validMapping docStoreVar fieldIndexVar fieldMetadataVar
+  traverse_ (storeTokens memtableVar fieldMetadataVar) docsNewerThanSnapshot
+  pure $
+    IndexData
+      validMapping
+      docStoreVar
+      memtableVar
+      fieldMetadataVar
+      sparseIndexVar
+      fieldNamesVar
   where
     docsFromAppendLog :: Map.Map DocId Document
-    docsFromAppendLog = Map.fromList ((\d -> (d.docId, d)) <$> docs)
+    docsFromAppendLog = Map.fromList ((\d -> (d.docId, d)) <$> docsFromLog)
 
 indexDoc ::
   Mapping ->
@@ -163,10 +203,10 @@ storeTokens ::
   TVar.TVar FieldMetadata ->
   Document ->
   TVar.STM ()
-storeTokens fieldIndexVar fieldMetadataVar doc = do
+storeTokens memtableVar fieldMetadataVar doc = do
   do
-    fieldIndex <- TVar.readTVar fieldIndexVar
+    fieldIndex <- TVar.readTVar memtableVar
     fieldMeta <- TVar.readTVar fieldMetadataVar
     let (updatedIndex, updatedMeta) = updateIndex doc fieldIndex fieldMeta
-    TVar.writeTVar fieldIndexVar updatedIndex
+    TVar.writeTVar memtableVar updatedIndex
     TVar.writeTVar fieldMetadataVar updatedMeta
