@@ -89,6 +89,7 @@ library
                     , Kengine.Persistence.FileStore
                     , Kengine.Persistence.Binary
                     , Kengine.Persistence.Flush
+                    , Kengine.Debug.Layout
 
     -- Modules included in this library but not exported.
     other-modules:

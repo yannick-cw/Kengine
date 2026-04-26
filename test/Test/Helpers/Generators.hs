@@ -180,6 +180,8 @@ genHeader = do
   docCount <- genW32
   fieldNames <- Gen.list (Range.linear 1 1000) genValidFieldName
   termSparseOffset <- Gen.word64 (Range.linear 0 1000)
+  docSparseOffset <- Gen.word64 (Range.linear 0 1000)
+  metaSparseOffset <- Gen.word64 (Range.linear 0 1000)
   storedFieldsOffset <- Gen.word64 (Range.linear 0 1000)
   docMetadataOffset <- Gen.word64 (Range.linear 0 1000)
   pure
@@ -189,6 +191,8 @@ genHeader = do
       , docCount
       , fieldNames
       , termSparseOffset
+      , docSparseOffset
+      , metaSparseOffset
       , storedFieldsOffset
       , docMetadataOffset
       }

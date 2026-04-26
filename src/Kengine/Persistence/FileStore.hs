@@ -52,7 +52,8 @@ data FileStore = FileStore
   , storeDoc :: IndexName -> Document -> IOE KengineError ()
   , readDocs :: IndexName -> IOE KengineError [Document]
   , readSnapshot ::
-      IndexName -> IOE KengineError (DocStore, SparseIndex, FieldStats, [FieldName])
+      IndexName -> IOE KengineError (Maybe (Header, DocStore, SparseIndex, FieldStats))
+  , indexDir :: IndexName -> FilePath
   , readDiskFieldIndex :: IndexName -> Segment -> BlockLocation -> IOE KengineError FieldIndex
   , readSnapshotFieldIndex :: IndexName -> IOE KengineError (Maybe FieldIndex)
   , writePendingSnapshot ::
@@ -74,6 +75,7 @@ mkFileStore' dir =
     , storeDoc = storeDoc' dir
     , readDocs = readDocs' dir
     , readSnapshot = readSnapshot' dir
+    , indexDir = pathToIdx dir
     , readDiskFieldIndex = readDiskFieldIndex' dir
     , readSnapshotFieldIndex = readSnapshotFieldIndex' dir
     , writePendingSnapshot = writePendingSnapshot' dir
@@ -107,11 +109,9 @@ readDocs' dir idxName =
 readSnapshot' ::
   FilePath ->
   IndexName ->
-  IOE KengineError (DocStore, SparseIndex, FieldStats, [FieldName])
-readSnapshot' dir idxName = do
-  s <- readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> snapshotFile)
-  pure
-    (M.maybe (Map.empty, Map.empty, Map.empty, []) (\(h, a, b, c) -> (a, b, c, h.fieldNames)) s)
+  IOE KengineError (Maybe (Header, DocStore, SparseIndex, FieldStats))
+readSnapshot' dir idxName =
+  readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> snapshotFile)
 
 readDiskFieldIndex' ::
   FilePath -> IndexName -> Segment -> BlockLocation -> IOE KengineError FieldIndex

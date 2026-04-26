@@ -58,6 +58,50 @@ instance Binary FieldName where
   put = put . unrefine
   get = refineFail =<< get
 
+{- | On-disk segment layout (written here, read by 'decodeSnapshot'):
+
+  HEADER
+    "KENG"               4 bytes magic
+    version              u8
+    mappingVersion       u32 BE
+    docCount             u32 BE
+    fieldCount           u16 BE
+    fieldNames           fieldCount * (u16 len + utf8 bytes)
+    termSparseOffset     u64 BE   -> start of SPARSE INDEX
+    docSparseOffset      u64 BE   -> start of SPARSE DOC INDEX
+    storedFieldsOffset   u64 BE   -> start of STORED DOCS
+    docMetadataOffset    u64 BE   -> start of FIELD METADATA
+
+  TOKEN BLOCKS  (sorted by (fieldId, token); 128 entries per block)
+    per entry:
+      fieldId            u16 BE
+      token              u16 len + utf8 bytes
+      postingCount       u32 BE
+      postings           postingCount * (u32 docId, u32 tf)
+
+  SPARSE INDEX  (one entry per token block; same sort order)
+    fieldId              u16 BE
+    token                u16 len + utf8 bytes
+    blockOffset          u64 BE   -> first byte of that block in TOKEN BLOCKS
+
+  STORED DOCS  (sorted by docId)
+    docId                u32 BE
+    bodyLen              u32 BE
+    body                 bodyLen bytes (Data.Binary encoding of the doc body)
+
+  FIELD METADATA  (one per (docId, text field); sorted by docId)
+    docId                u32 BE
+    fieldId              u16 BE
+    tokenCount           u32 BE
+
+  SPARSE DOC INDEX  (one entry per doc block)
+    docId                u32 BE
+    firstBlock           u64 BE
+
+  SPARSE META INDEX (one entry per meta block)
+    docId                u32 BE
+    firstBlock           u64 BE
+-}
 encodeState :: DocStore -> FieldIndex -> FieldStats -> BS.ByteString
 encodeState docStore fieldIndex metadata =
   let
@@ -72,15 +116,24 @@ encodeState docStore fieldIndex metadata =
     sparseIndexBytes = C.runPut $ traverse_ putSparseIndexEntry sparseIndex
     documentBytes = encodeDocs docStore
     metaBytes = encodeMetadata fieldNameToId metadata
+    docSparseBytes = ""
 
     termSparseOffset = fromIntegral $ headerOffset + BS.length tokenBlocksBytes
     storedFieldsOffset = termSparseOffset + fromIntegral (BS.length sparseIndexBytes)
     docMetadataOffset = storedFieldsOffset + fromIntegral (BS.length documentBytes)
+    docSparseOffset = docMetadataOffset + fromIntegral (BS.length metaBytes)
+    metaSparseOffset = docSparseOffset + fromIntegral (BS.length docSparseBytes)
 
     finalHeader =
       C.runPut $
         putHeader
-          nonOffsetHeader{termSparseOffset, storedFieldsOffset, docMetadataOffset}
+          nonOffsetHeader
+            { termSparseOffset
+            , docSparseOffset
+            , metaSparseOffset
+            , storedFieldsOffset
+            , docMetadataOffset
+            }
    in
     finalHeader <> tokenBlocksBytes <> sparseIndexBytes <> documentBytes <> metaBytes
 
@@ -92,6 +145,8 @@ emptyHeader fieldNames docCount =
     , docCount = fromIntegral docCount
     , fieldNames
     , termSparseOffset = 0
+    , docSparseOffset = 0
+    , metaSparseOffset = 0
     , storedFieldsOffset = 0
     , docMetadataOffset = 0
     }
@@ -105,11 +160,11 @@ encodeTokenBlocks fieldNameToId fieldIndex =
       (fieldName, tokensMap) <- Map.toList fieldIndex
       (token, docs) <- Map.toList tokensMap
       pure TokenEntry{fieldId = fieldNameToId Map.! fieldName, token, docs = Map.toList docs}
-    tokenGroups = nelChunksOf 128 tokenEntries
+    tokenGroups = nelChunksOf 16 tokenEntries
     tokenBlocks = C.runPut . void <$> fmap (traverse putTokenEntry) tokenGroups
     blockSizes = BS.length <$> tokenBlocks
     relativeOffsets = scanl (+) 0 blockSizes
-    -- build sparse index, needs offsets from above per 128 entries
+    -- build sparse index, needs offsets from above per 16 entries
     sparseIndex =
       zipWith
         ( \((TokenEntry{fieldId, token}) Nel.:| _) firstBlockOffset ->
@@ -227,6 +282,8 @@ data Header = Header
   , docCount :: Word32
   , fieldNames :: [FieldName]
   , termSparseOffset :: Word64
+  , docSparseOffset :: Word64
+  , metaSparseOffset :: Word64
   , storedFieldsOffset :: Word64
   , docMetadataOffset :: Word64
   }
@@ -240,6 +297,8 @@ putHeader
     , docCount
     , fieldNames
     , termSparseOffset
+    , docSparseOffset
+    , metaSparseOffset
     , storedFieldsOffset
     , docMetadataOffset
     } = do
@@ -250,6 +309,8 @@ putHeader
     C.putWord16be (fromIntegral $ length fieldNames)
     traverse_ putFieldName fieldNames
     C.putWord64be termSparseOffset
+    C.putWord64be docSparseOffset
+    C.putWord64be metaSparseOffset
     C.putWord64be storedFieldsOffset
     C.putWord64be docMetadataOffset
     where
@@ -269,6 +330,8 @@ getHeader = do
   fieldCount <- C.getWord16be
   fieldNames <- replicateM (fromIntegral fieldCount) getFieldName
   termSparseOffset <- C.getWord64be
+  docSparseOffset <- C.getWord64be
+  metaSparseOffset <- C.getWord64be
   storedFieldsOffset <- C.getWord64be
   docMetadataOffset <- C.getWord64be
   pure
@@ -278,6 +341,8 @@ getHeader = do
       , docCount
       , fieldNames
       , termSparseOffset
+      , docSparseOffset
+      , metaSparseOffset
       , storedFieldsOffset
       , docMetadataOffset
       }
@@ -342,6 +407,20 @@ getSparseIndexEntry = do
   token <- Token . decodeUtf8 <$> C.getBytes (fromIntegral tokenLength)
   firstBlockOffset <- C.getWord64be
   pure SparseIndexEntry{fieldId, token, firstBlockOffset}
+
+data DocSparseEntry = DocSparseEntry {docId :: DocId, firstDocOffset :: Word64}
+  deriving stock (Eq, Show)
+
+putDocSparseEntry :: DocSparseEntry -> C.Put
+putDocSparseEntry DocSparseEntry{docId = (DocId dId), firstDocOffset} = do
+  C.putWord32be (fromIntegral dId)
+  C.putWord64be firstDocOffset
+
+getDocSparseEntry :: C.Get DocSparseEntry
+getDocSparseEntry = do
+  docId <- DocId . fromIntegral <$> C.getWord32be
+  firstDocOffset <- C.getWord64be
+  pure DocSparseEntry{docId, firstDocOffset}
 
 putDocument :: Document -> C.Put
 putDocument Document{docId = DocId dId, body} = do

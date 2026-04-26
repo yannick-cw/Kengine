@@ -1,6 +1,7 @@
 module Kengine.Index.Update (updateIndex) where
 
 import Data.Map qualified as Map
+import Data.Text qualified as T
 import Kengine.Tokenize (tokenize)
 import Kengine.Types (
   DocFieldStats (..),
@@ -8,9 +9,9 @@ import Kengine.Types (
   Document (..),
   FieldIndex,
   FieldStats,
-  FieldValue (TextVal),
+  FieldValue (KeywordVal, TextVal),
   TermFrequency (TF),
-  Token,
+  Token (Token),
  )
 
 updateIndex ::
@@ -24,6 +25,7 @@ updateIndex fieldIndex fieldMeta Document{docId, body} =
       Map.mapMaybe
         ( \case
             (TextVal txt) -> Just (tokenize txt)
+            (KeywordVal txt) -> Just [Token $ T.toLower txt]
             _ -> Nothing
         )
         body

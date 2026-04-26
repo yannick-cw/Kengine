@@ -13,6 +13,9 @@ import Kengine.Errors (IOE, KengineError (FileError, SearchError))
 import Kengine.Index.Document (parseDocument)
 import Kengine.Index.Update (updateIndex)
 import Kengine.Mapping (validateMapping)
+import Data.Text.Lazy qualified as LT
+import Kengine.Debug.Layout qualified as Layout
+import Kengine.Persistence.Binary (Header (..))
 import Kengine.Persistence.FileStore (FileStore (..))
 import Kengine.Persistence.Flush (flushSegment)
 import Kengine.Search (searchQ)
@@ -22,7 +25,6 @@ import Kengine.Types (
   DocId (DocId),
   DocStore,
   Document (..),
-  FieldName,
   FieldStats,
   IndexData (..),
   IndexName,
@@ -45,6 +47,7 @@ data Store = Store
   , indexDoc :: IndexName -> AE.Value -> IOE KengineError IndexResponse
   , search :: IndexName -> Query -> IOE KengineError SearchResults
   , flushState :: IOE KengineError ()
+  , debugLayout :: IndexName -> IOE KengineError LT.Text
   }
 
 mkStore :: FileStore -> IOE KengineError Store
@@ -56,6 +59,7 @@ mkStore fs = do
       , indexDoc = indexDoc' indexViewVar fs
       , search = search' indexViewVar fs
       , flushState = flushState' indexViewVar fs
+      , debugLayout = Layout.renderLayout fs indexViewVar
       }
 
 loadIndexes :: FileStore -> IOE KengineError (TVar.TVar IndexView)
@@ -179,11 +183,14 @@ createEmptyIdxData validMapping =
 
 createInitialIdxData ::
   Mapping ->
-  (DocStore, SparseIndex, FieldStats, [FieldName]) ->
+  Maybe (Header, DocStore, SparseIndex, FieldStats) ->
   [Document] ->
   IndexData
-createInitialIdxData validMapping (docsFromSnapshot, sparseIndex, fieldMeta, fieldNames) docsFromLog =
+createInitialIdxData validMapping snapshot docsFromLog =
   let
+    (docsFromSnapshot, sparseIndex, fieldMeta, fieldNames) = case snapshot of
+      Nothing -> (Map.empty, Map.empty, Map.empty, [])
+      Just (h, ds, si, fs) -> (ds, si, fs, h.fieldNames)
     docStore = Map.union docsFromSnapshot docsFromAppendLog
     -- this should in practice just be `docsFromAppendLog` - but in case of crash
     -- append log docs would have not been cleaned up

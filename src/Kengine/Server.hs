@@ -12,6 +12,7 @@ import System.IO (hPutStrLn, stderr)
 import Web.Scotty (
   ActionM,
   get,
+  html,
   json,
   jsonData,
   pathParam,
@@ -35,7 +36,7 @@ runServer = do
       exitFailure
 
 routes :: Store -> ScottyT IO ()
-routes Store{createIndex, indexDoc, search, flushState} = do
+routes Store{createIndex, indexDoc, search, flushState, debugLayout} = do
   get "/indexes/:name/search" $ do
     n <- pathParam "name"
     q <- queryParam "q"
@@ -50,6 +51,14 @@ routes Store{createIndex, indexDoc, search, flushState} = do
     resOrErr (indexDoc n r)
   post "/flush-state" $ do
     resOrErr flushState
+  get "/indexes/:name/_layout" $ do
+    n <- pathParam "name"
+    result <- liftIO $ runExceptT (debugLayout n)
+    case result of
+      Right h -> html h
+      Left err -> do
+        status status400
+        text $ TL.show err
 
 resOrErr :: (ToJSON a, Show e) => ExceptT e IO a -> ActionM ()
 resOrErr action = do
