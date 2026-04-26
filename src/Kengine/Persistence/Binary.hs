@@ -5,6 +5,7 @@ module Kengine.Persistence.Binary (
   decodeTokenEntry,
   putDocument,
   decodeSnapshot,
+  getMany,
   getDocument,
   putHeader,
   SparseIndexEntry (..),
@@ -36,6 +37,7 @@ import Kengine.Types (
   BlockLocation (..),
   DocFieldStats (..),
   DocId (..),
+  DocSparseIndex,
   DocStore,
   Document (..),
   FieldIndex,
@@ -114,9 +116,10 @@ encodeState docStore fieldIndex metadata =
 
     (tokenBlocksBytes, sparseIndex) = encodeTokenBlocks fieldNameToId fieldIndex
     sparseIndexBytes = C.runPut $ traverse_ putSparseIndexEntry sparseIndex
-    documentBytes = encodeDocs docStore
+    documentBlocks = encodeDocs docStore
+    documentBytes = BS.concat $ snd <$> documentBlocks
     metaBytes = encodeMetadata fieldNameToId metadata
-    docSparseBytes = ""
+    docSparseBytes = encodeDocSparse documentBlocks
 
     termSparseOffset = fromIntegral $ headerOffset + BS.length tokenBlocksBytes
     storedFieldsOffset = termSparseOffset + fromIntegral (BS.length sparseIndexBytes)
@@ -135,7 +138,12 @@ encodeState docStore fieldIndex metadata =
             , docMetadataOffset
             }
    in
-    finalHeader <> tokenBlocksBytes <> sparseIndexBytes <> documentBytes <> metaBytes
+    finalHeader
+      <> tokenBlocksBytes
+      <> sparseIndexBytes
+      <> documentBytes
+      <> metaBytes
+      <> docSparseBytes
 
 emptyHeader :: [FieldName] -> Int -> Header
 emptyHeader fieldNames docCount =
@@ -175,8 +183,27 @@ encodeTokenBlocks fieldNameToId fieldIndex =
    in
     (BS.concat tokenBlocks, sparseIndex)
 
-encodeDocs :: DocStore -> BS.ByteString
-encodeDocs = C.runPut . traverse_ putDocument . sortOn (.docId) . Map.elems
+encodeDocs :: DocStore -> [(DocId, BS.ByteString)]
+encodeDocs docStore =
+  let
+    docsChunks = nelChunksOf 128 (sortOn (.docId) (Map.elems docStore))
+    docBlocks =
+      (\docBlock -> ((Nel.head docBlock).docId, C.runPut (traverse_ putDocument docBlock)))
+        <$> docsChunks
+   in
+    docBlocks
+
+encodeDocSparse :: [(DocId, BS.ByteString)] -> BS.ByteString
+encodeDocSparse docBlocks =
+  let
+    allRelativeOffsets = scanl (+) 0 (BS.length . snd <$> docBlocks)
+    sparseEntries =
+      zipWith
+        (\docId blockOffset -> DocSparseEntry docId (fromIntegral blockOffset))
+        (fst <$> docBlocks)
+        allRelativeOffsets
+   in
+    C.runPut $ traverse_ putDocSparseEntry sparseEntries
 
 encodeMetadata :: Map.Map FieldName Word16 -> FieldStats -> BS.ByteString
 encodeMetadata fieldNameToId metadata =
@@ -204,7 +231,8 @@ getMany getOne = do
       pure $ r : rest
 
 decodeSnapshot ::
-  BS.ByteString -> Either String (Header, DocStore, FieldIndex, SparseIndex, FieldStats)
+  BS.ByteString ->
+  Either String (Header, DocStore, FieldIndex, SparseIndex, DocSparseIndex, FieldStats)
 decodeSnapshot = C.runGet $ do
   header <- getHeader
   headerSize <- C.bytesRead
@@ -214,12 +242,20 @@ decodeSnapshot = C.runGet $ do
   let sparseIndexSize = fromIntegral header.storedFieldsOffset - headerAndEntrySize
   sparseEntries <- C.isolate sparseIndexSize (getMany getSparseIndexEntry)
   docs <- replicateM (fromIntegral header.docCount) getDocument
-  meta <- getMany getFieldMeta
+  let metaEntriesSize = fromIntegral (header.docSparseOffset - header.docMetadataOffset)
+  meta <- C.isolate metaEntriesSize (getMany getFieldMeta)
+  let sparseDocIndexSize = fromIntegral (header.metaSparseOffset - header.docSparseOffset)
+  sparseDocEntries <- C.isolate sparseDocIndexSize (getMany getDocSparseEntry)
   pure
     ( header
     , buildDocStore docs
     , buildFieldIndex header tokenEntries
-    , buildSparseIndex header headerSize tokenSectionSize sparseEntries
+    , buildSparseIndex
+        header
+        (fromIntegral headerSize)
+        (fromIntegral tokenSectionSize)
+        sparseEntries
+    , buildDocSparseIndex header sparseDocEntries
     , buildFieldStats header meta
     )
 
@@ -252,26 +288,48 @@ buildFieldStats header meta =
         <$> meta
     )
 
-buildSparseIndex :: Header -> Int -> Int -> [SparseIndexEntry] -> SparseIndex
+buildSparseIndex :: Header -> Word64 -> Word64 -> [SparseIndexEntry] -> SparseIndex
 buildSparseIndex header headerSize tokenSectionSize sparseEntries =
   let
-    -- these are all the endpoints for each block, I drop the first offset and add the tokenEntrySize as last byte
-    nextRelativeOffset =
-      drop 1 $ ((.firstBlockOffset) <$> sparseEntries) ++ [fromIntegral tokenSectionSize]
-    sparseIndexes =
-      ( \(e, nextBlockStart) ->
-          Map.singleton
-            (header.fieldNames !! fromIntegral e.fieldId, e.token)
-            -- we convert the relative block offsets to absolute offsets
-            ( BlockLocation
-                { firstByte = fromIntegral (e.firstBlockOffset + fromIntegral headerSize)
-                , size = fromIntegral (nextBlockStart - e.firstBlockOffset)
-                }
-            )
-      )
-        <$> zip sparseEntries nextRelativeOffset
+    blockLocations = buildBlockLocations headerSize tokenSectionSize ((.firstBlockOffset) <$> sparseEntries)
+    indexes =
+      zipWith
+        Map.singleton
+        ((\e -> (header.fieldNames !! fromIntegral e.fieldId, e.token)) <$> sparseEntries)
+        blockLocations
    in
-    foldl' Map.union Map.empty sparseIndexes
+    foldl' Map.union Map.empty indexes
+
+buildDocSparseIndex :: Header -> [DocSparseEntry] -> DocSparseIndex
+buildDocSparseIndex header sparseEntries =
+  let
+    sectionSize = header.docMetadataOffset - header.storedFieldsOffset
+    blockLocations =
+      buildBlockLocations
+        header.storedFieldsOffset
+        sectionSize
+        ((.firstDocOffset) <$> sparseEntries)
+    indexes = zipWith Map.singleton ((.docId) <$> sparseEntries) blockLocations
+   in
+    foldl' Map.union Map.empty indexes
+
+buildBlockLocations :: Word64 -> Word64 -> [Word64] -> [BlockLocation]
+buildBlockLocations sectionFirstByte wholeSectionSize firstEntryOffsets =
+  let
+    -- these are all the endpoints for each block
+    nextRelativeOffset = drop 1 $ firstEntryOffsets ++ [wholeSectionSize]
+    sparseIndexes =
+      ( \(entryOffset, nextBlockOffset) ->
+          -- we convert the relative block offsets to absolute offsets
+          ( BlockLocation
+              { firstByte = fromIntegral (entryOffset + sectionFirstByte)
+              , size = fromIntegral (nextBlockOffset - entryOffset)
+              }
+          )
+      )
+        <$> zip firstEntryOffsets nextRelativeOffset
+   in
+    sparseIndexes
 
 decodeTokenEntry :: BS.ByteString -> Either String [TokenEntry]
 decodeTokenEntry = C.runGet (getMany getTokenEntry)

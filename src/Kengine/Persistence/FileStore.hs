@@ -236,14 +236,14 @@ snapshotDeCodec =
   DeCodec
     { decode =
         first (FileError . T.pack)
-          . fmap (\(h, ds, _fi, si, fs) -> (h, ds, si, fs))
+          . fmap (\(h, ds, _fi, si, _dsi, fs) -> (h, ds, si, fs))
           . decodeSnapshot
     }
 
 fieldIndexDecode :: DeCodec FieldIndex
 fieldIndexDecode =
   DeCodec
-    { decode = first (FileError . T.pack) . fmap (\(_, _, f, _, _) -> f) . decodeSnapshot
+    { decode = first (FileError . T.pack) . fmap (\(_, _, f, _, _, _) -> f) . decodeSnapshot
     }
 
 blockDecode :: DeCodec [TokenEntry]

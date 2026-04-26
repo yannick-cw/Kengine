@@ -164,6 +164,7 @@ test-suite kengine-test
         base ^>=4.21.0.0,
         kengine,
         hspec,
+        bytestring,
         hedgehog,
         hspec-hedgehog,
         aeson,

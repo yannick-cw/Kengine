@@ -1,13 +1,14 @@
 module Test.Persistence.Binary (spec) where
 
 import Data.Serialize qualified as C
-import Hedgehog (diff, forAll)
+import Hedgehog (diff, evalEither, evalMaybe, forAll)
 import Kengine.Persistence.Binary (
   decodeSnapshot,
   encodeState,
   getDocument,
   getFieldMeta,
   getHeader,
+  getMany,
   getSparseIndexEntry,
   getTokenEntry,
   putDocument,
@@ -16,8 +17,10 @@ import Kengine.Persistence.Binary (
   putSparseIndexEntry,
   putTokenEntry,
  )
-import Kengine.Types (DocId (..), Document (..))
+import Kengine.Types (BlockLocation (..), DocId (..), Document (..))
 
+import Data.ByteString qualified as BS
+import Data.Map qualified as Map
 import Test.Helpers.Generators (
   genDocForMapping,
   genFieldMeta,
@@ -56,8 +59,17 @@ spec = do
       (docStore, fieldIndex, metadata) <- forAll genState
       diff
         -- ignoring sparse index + header, derived struture
-        ( (\(_, a, b, _, d) -> (a, b, d))
+        ( (\(_, a, b, _, _, d) -> (a, b, d))
             <$> decodeSnapshot (encodeState docStore fieldIndex metadata)
         )
         (==)
         (Right (docStore, fieldIndex, metadata))
+    it "creates sparse index for docs that can retrieve docs" $ hedgehog $ do
+      (docStore, fieldIndex, metadata) <- forAll genState
+      let docToFind = head $ Map.keys docStore
+      let encodedBytes = encodeState docStore fieldIndex metadata
+      (_, _, _, _, docIdx, _) <- evalEither $ decodeSnapshot encodedBytes
+      (_, BlockLocation{firstByte, size}) <- evalMaybe $ Map.lookupLE docToFind docIdx
+      let blockBytes = BS.take size (BS.drop firstByte encodedBytes)
+      eles <- evalEither $ C.runGet (getMany getDocument) blockBytes
+      diff ((.docId) <$> eles) (flip elem) docToFind

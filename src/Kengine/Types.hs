@@ -1,5 +1,6 @@
 module Kengine.Types (
   BM25 (..),
+  DocSparseIndex,
   Memtable (..),
   Segment (..),
   Mapping (..),
@@ -67,6 +68,7 @@ type PostingList = Map.Map DocId TermFrequency
 type InvertedIndex = Map.Map Token PostingList
 type FieldIndex = Map.Map FieldName InvertedIndex
 type SparseIndex = Map.Map (FieldName, Token) BlockLocation
+type DocSparseIndex = Map.Map DocId BlockLocation
 type DocStore = Map.Map DocId Document
 type IndexView = (Map.Map IndexName (TVar.TVar IndexData))
 type FieldStats = Map.Map FieldName (Map.Map DocId DocFieldStats)
