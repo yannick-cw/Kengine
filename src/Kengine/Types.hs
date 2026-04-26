@@ -86,6 +86,7 @@ data IndexData = IndexData
   { mapping :: Mapping
   , memtable :: Memtable
   , segment :: Segment
+  , maxDocId :: DocId
   }
 
 -- Creation Types

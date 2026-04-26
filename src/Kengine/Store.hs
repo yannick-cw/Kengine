@@ -3,15 +3,13 @@ module Kengine.Store (Store (..), mkStore) where
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (ExceptT (..), throwE)
 import Data.Aeson qualified as AE
-import Data.List qualified as L
 import Data.Map qualified as Map
 import Data.Maybe qualified as M
-import Data.Ord (Down (Down))
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as LT
 import GHC.Conc qualified as TVar
 import Kengine.Debug.Layout qualified as Layout
-import Kengine.Errors (IOE, KengineError (FileError, SearchError))
+import Kengine.Errors (IOE, KengineError (FileError, SearchError), Result)
 import Kengine.Index.Document (parseDocument)
 import Kengine.Index.Update (updateIndex)
 import Kengine.Mapping (validateMapping)
@@ -24,7 +22,6 @@ import Kengine.Types (
   BlockLocation,
   DocId (DocId),
   DocSparseIndex,
-  DocStore,
   Document (..),
   FieldStats,
   IndexData (..),
@@ -122,11 +119,11 @@ indexDoc' indexViewVar FileStore{storeDoc} name jval = do
   doc <- buildDoc indexDataVar jval
   storeDoc name doc
   liftIO $ TVar.atomically $ do
-    IndexData{mapping, memtable, segment} <- TVar.readTVar indexDataVar
-    let Memtable{fieldIdx, fieldMeta} = memtable
+    idxData@IndexData{memtable = memtable@Memtable{fieldIdx, fieldMeta}} <-
+      TVar.readTVar indexDataVar
     let (updatedFieldIdx, updatedFieldMeta) = updateIndex fieldIdx fieldMeta doc
     let updatedMemtable = memtable{fieldIdx = updatedFieldIdx, fieldMeta = updatedFieldMeta}
-    TVar.writeTVar indexDataVar IndexData{mapping, memtable = updatedMemtable, segment}
+    TVar.writeTVar indexDataVar idxData{memtable = updatedMemtable}
   pure IndexResponse{status = Indexed}
 
 search' ::
@@ -135,7 +132,7 @@ search' ::
   IndexName ->
   Query ->
   IOE KengineError SearchResults
-search' indexViewVar FileStore{readDiskFieldIndex} name (Query query) = do
+search' indexViewVar FileStore{readDiskFieldIndex, readDiskDoc} name (Query query) = do
   idxView <- liftIO $ TVar.readTVarIO indexViewVar
   idxDataVar <- lookupIndex name idxView
   IndexData{memtable = Memtable{docStore, fieldIdx, fieldMeta}, segment} <-
@@ -145,10 +142,16 @@ search' indexViewVar FileStore{readDiskFieldIndex} name (Query query) = do
   fromFileInvertedIdx <- traverse (readDiskFieldIndex name segment) offsets
   let completeFromFileIdx = foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty fromFileInvertedIdx
   let completeFieldIndex = Map.unionWith (Map.unionWith Map.union) fieldIdx completeFromFileIdx
-  pure $
-    SearchResults
-      { results = searchQ qTokens docStore completeFieldIndex fieldMeta
-      }
+  -- todo better in the future to get for all docId candidates once
+  SearchResults
+    <$> searchQ qTokens docStore completeFieldIndex fieldMeta (diskDocLookup segment)
+  where
+    diskDocLookup :: Segment -> DocId -> Result (Maybe Document)
+    diskDocLookup segment docId =
+      maybe
+        (pure Nothing)
+        (fmap (Map.lookup docId) . readDiskDoc name)
+        (resolveDocSparseIdx docId segment)
 
 flushState' :: TVar.TVar IndexView -> FileStore -> IOE KengineError ()
 flushState' indexViewVar fs = do
@@ -174,38 +177,48 @@ resolveSparseIdx tkns Segment{sparseIndex, fieldNames} =
           pure $ Map.lookupLE (fn, tkn) sparseIndex
       )
 
+resolveDocSparseIdx :: DocId -> Segment -> Maybe BlockLocation
+resolveDocSparseIdx tkns Segment{docsSparseIndex} = snd <$> Map.lookupLE tkns docsSparseIndex
+
 createEmptyIdxData :: Mapping -> IndexData
 createEmptyIdxData validMapping =
   IndexData
     { mapping = validMapping
     , memtable = Memtable{docStore = Map.empty, fieldIdx = Map.empty, fieldMeta = Map.empty}
     , segment = Segment Map.empty [] Map.empty
+    , maxDocId = DocId 0
     }
 
 createInitialIdxData ::
   Mapping ->
-  Maybe (Header, DocStore, SparseIndex, DocSparseIndex, FieldStats) ->
+  Maybe (Header, SparseIndex, DocSparseIndex, FieldStats) ->
   [Document] ->
   IndexData
 createInitialIdxData validMapping snapshot docsFromLog =
   let
-    (docsFromSnapshot, sparseIndex, fieldMeta, fieldNames, docSparse) = case snapshot of
-      Nothing -> (Map.empty, Map.empty, Map.empty, [], Map.empty)
-      Just (h, ds, si, dsi, fs) -> (ds, si, fs, h.fieldNames, dsi)
-    docStore = Map.union docsFromSnapshot docsFromAppendLog
+    -- todo just for now header.docCount as max id - wont hold for deletions
+    (sparseIndex, fieldMeta, fieldNames, docSparse, maxSnapshotId) = case snapshot of
+      Nothing -> (Map.empty, Map.empty, [], Map.empty, 0)
+      Just (h, si, dsi, fs) -> (si, fs, h.fieldNames, dsi, fromIntegral h.docCount)
     -- this should in practice just be `docsFromAppendLog` - but in case of crash
     -- append log docs would have not been cleaned up
-    docsNewerThanSnapshot = Map.difference docsFromAppendLog docsFromSnapshot
     (updatedFieldIdx, updatedFieldMeta) =
       foldl'
         (\(fieldIdx, meta) nextDoc -> updateIndex fieldIdx meta nextDoc)
         (Map.empty, fieldMeta)
-        docsNewerThanSnapshot
+        docsFromAppendLog
+    maxDocId = foldl' max (DocId maxSnapshotId) ((.docId) <$> docsFromLog)
    in
     IndexData
       { mapping = validMapping
-      , memtable = Memtable{docStore, fieldIdx = updatedFieldIdx, fieldMeta = updatedFieldMeta}
+      , memtable =
+          Memtable
+            { docStore = docsFromAppendLog
+            , fieldIdx = updatedFieldIdx
+            , fieldMeta = updatedFieldMeta
+            }
       , segment = Segment sparseIndex fieldNames docSparse
+      , maxDocId
       }
   where
     docsFromAppendLog :: Map.Map DocId Document
@@ -219,13 +232,12 @@ buildDoc indexDataVar jval = do
   IndexData{mapping = parseMapping} <- liftIO $ TVar.readTVarIO indexDataVar
   docToIndex <- ExceptT . pure $ parseDocument jval parseMapping
   liftIO $ TVar.atomically $ do
-    IndexData{mapping, memtable, segment} <- TVar.readTVar indexDataVar
+    idxData@IndexData{memtable, maxDocId} <- TVar.readTVar indexDataVar
     let Memtable{docStore} = memtable
-    let hightestDocId = M.listToMaybe $ L.sortOn Down (Map.keys docStore)
-    let nextDocId = maybe (DocId 1) (1 +) hightestDocId
+    let nextDocId = maxDocId + 1
     let newDoc = Document{docId = nextDocId, body = docToIndex}
     let newDocStore = Map.insert nextDocId newDoc docStore
     TVar.writeTVar
       indexDataVar
-      IndexData{mapping, memtable = memtable{docStore = newDocStore}, segment}
+      idxData{memtable = memtable{docStore = newDocStore}, maxDocId = nextDocId}
     pure newDoc

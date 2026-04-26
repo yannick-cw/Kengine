@@ -4,11 +4,13 @@ import Data.List qualified as L
 import Data.List.NonEmpty qualified as NEL
 import Data.Map qualified as Map
 import Data.Ord (Down (Down))
+import Kengine.Errors (Result)
 import Kengine.Types (
   BM25 (..),
   DocFieldStats (..),
   DocId,
   DocStore,
+  Document,
   FieldIndex,
   FieldName,
   FieldStats,
@@ -24,18 +26,30 @@ searchQ ::
   DocStore ->
   FieldIndex ->
   FieldStats ->
-  [SearchResult]
-searchQ tokenizedQ docStore fieldIndex fieldMeta =
+  (DocId -> Result (Maybe Document)) ->
+  Result [SearchResult]
+searchQ tokenizedQ docStore fieldIndex fieldMeta docDiskLookup =
   let
     -- each entry is one map of docs of scores for one field
     perFieldResults :: [Map.Map DocId Score]
     perFieldResults = Map.elems $ Map.mapWithKey searchOneField fieldIndex
     perDocScore = Map.fromListWith (+) (Map.toList =<< perFieldResults)
    in
-    L.sortOn Down $
-      Map.elems $
-        Map.intersectionWith (\score doc -> SearchResult{doc, score}) perDocScore docStore
+    L.sortOn Down
+      . Map.elems
+      <$> Map.traverseMaybeWithKey
+        ( \docId score ->
+            fmap (\doc -> SearchResult{doc, score})
+              <$> case Map.lookup docId docStore of
+                Just doc -> pure $ Just doc
+                -- we need disk lookup
+                Nothing -> docDiskLookup docId
+        )
+        perDocScore
   where
+    -- Map.elems $
+    --   Map.intersectionWith (\score doc -> SearchResult{doc, score}) perDocScore docStore
+
     -- inverted index for that specific field
     searchOneField :: FieldName -> InvertedIndex -> Map.Map DocId Score
     searchOneField fName invertedIndex =

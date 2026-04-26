@@ -1,10 +1,11 @@
--- | Debug-only HTML overview of an index's on-disk layout and in-memory state.
---
--- Goes through FileStore for path + snapshot reads so this stays in sync with
--- the production layout. Read-only and only wired into one debug endpoint.
-
 -- !!! THIS IS FULLY CLAUDE CODE GENERATED !!! --
 -- Just as a nice additional tools
+
+{- | Debug-only HTML overview of an index's on-disk layout and in-memory state.
+
+Goes through FileStore for path + snapshot reads so this stays in sync with
+the production layout. Read-only and only wired into one debug endpoint.
+-}
 module Kengine.Debug.Layout (renderLayout) where
 
 import Control.Monad.IO.Class (liftIO)
@@ -83,7 +84,7 @@ readSnapshotInfo fs name path = do
   parsed <- fs.readSnapshot name
   case parsed of
     Nothing -> pure NoSnapshot
-    Just (h, _ds, sparse, docSparse, _meta) -> do
+    Just (h, sparse, docSparse, _meta) -> do
       sz <- liftIO (getFileSize path)
       pure (GoodSnapshot sz h sparse docSparse)
 
@@ -193,7 +194,8 @@ renderInvertedIndex fi
 renderFieldSummary :: FieldIndex -> B.Builder
 renderFieldSummary fi =
   raw "<h2>inverted index <span class=\"muted\">memtable + on-disk, merged</span></h2>"
-    <> raw "<table><tr><th>field</th><th class=\"num\">tokens</th><th class=\"num\">postings</th><th class=\"num\">max df</th><th>most common token</th></tr>"
+    <> raw
+      "<table><tr><th>field</th><th class=\"num\">tokens</th><th class=\"num\">postings</th><th class=\"num\">max df</th><th>most common token</th></tr>"
     <> mconcat (renderRow <$> Map.toAscList fi)
     <> raw "</table>"
   where
@@ -273,8 +275,18 @@ renderSnapshot path (GoodSnapshot sz h sparse _docSparse) =
 snapshotSections :: Integer -> Header -> [(Text, Text, Int, Int)]
 snapshotSections sz h =
   [ ("header + token blocks", "#ed7d31", 0, fromIntegral h.termSparseOffset)
-  , ("sparse index", "#a5a5a5", fromIntegral h.termSparseOffset, fromIntegral h.storedFieldsOffset)
-  , ("stored docs", "#70ad47", fromIntegral h.storedFieldsOffset, fromIntegral h.docMetadataOffset)
+  ,
+    ( "sparse index"
+    , "#a5a5a5"
+    , fromIntegral h.termSparseOffset
+    , fromIntegral h.storedFieldsOffset
+    )
+  ,
+    ( "stored docs"
+    , "#70ad47"
+    , fromIntegral h.storedFieldsOffset
+    , fromIntegral h.docMetadataOffset
+    )
   , ("field metadata", "#ffc000", fromIntegral h.docMetadataOffset, fromIntegral sz)
   ]
 
@@ -301,7 +313,8 @@ renderLayoutBar secs =
 
 renderSectionTable :: [(Text, Text, Int, Int)] -> B.Builder
 renderSectionTable secs =
-  raw "<table><tr><th>section</th><th class=\"num\">start</th><th class=\"num\">end</th><th class=\"num\">size</th></tr>"
+  raw
+    "<table><tr><th>section</th><th class=\"num\">start</th><th class=\"num\">end</th><th class=\"num\">size</th></tr>"
     <> mconcat
       [ raw "<tr><td><span class=\"sw\" style=\"background:"
           <> raw color
@@ -333,7 +346,8 @@ renderTermSparse sparse
             <> raw " of "
             <> B.decimal (Map.size sparse)
             <> raw " block anchors</span></h2>"
-            <> raw "<table><tr><th>field</th><th>token (block start)</th><th class=\"num\">byte offset</th><th class=\"num\">block size</th></tr>"
+            <> raw
+              "<table><tr><th>field</th><th>token (block start)</th><th class=\"num\">byte offset</th><th class=\"num\">block size</th></tr>"
             <> mconcat
               [ raw "<tr><td><code>"
                   <> escT (unrefine fn)
@@ -358,7 +372,8 @@ renderDocSparse docSparse
             <> raw " of "
             <> B.decimal (Map.size docSparse)
             <> raw " block anchors</span></h2>"
-            <> raw "<table><tr><th>first docId in block</th><th class=\"num\">byte offset</th><th class=\"num\">block size</th></tr>"
+            <> raw
+              "<table><tr><th>first docId in block</th><th class=\"num\">byte offset</th><th class=\"num\">block size</th></tr>"
             <> mconcat
               [ raw "<tr><td><code>"
                   <> B.decimal dId

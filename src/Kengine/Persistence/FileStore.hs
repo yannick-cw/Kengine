@@ -13,6 +13,7 @@ import Kengine.Errors (IOE, KengineError (FileError), liftIOE)
 import Kengine.Persistence.Binary (
   Header (..),
   TokenEntry (..),
+  decodeDocument,
   decodeSnapshot,
   decodeTokenEntry,
   encodeState,
@@ -53,14 +54,16 @@ data FileStore = FileStore
   , storeDoc :: IndexName -> Document -> IOE KengineError ()
   , readDocs :: IndexName -> IOE KengineError [Document]
   , readSnapshot ::
-      IndexName ->
-      IOE KengineError (Maybe (Header, DocStore, SparseIndex, DocSparseIndex, FieldStats))
+      IndexName -> IOE KengineError (Maybe (Header, SparseIndex, DocSparseIndex, FieldStats))
   , indexDir :: IndexName -> FilePath
   , readDiskFieldIndex :: IndexName -> Segment -> BlockLocation -> IOE KengineError FieldIndex
+  , readDiskDoc :: IndexName -> BlockLocation -> IOE KengineError DocStore
   , readSnapshotFieldIndex :: IndexName -> IOE KengineError (Maybe FieldIndex)
+  , readSnapshotDocs :: IndexName -> IOE KengineError (Maybe DocStore)
   , writePendingSnapshot ::
       IndexName -> (DocStore, FieldIndex, FieldStats) -> IOE KengineError ()
-  , readPendingSnapshotSegment :: IndexName -> IOE KengineError (SparseIndex, [FieldName])
+  , readPendingSnapshotSegment ::
+      IndexName -> IOE KengineError Segment
   , commitPendingSnapshot :: IndexName -> IOE KengineError ()
   , truncateWAL :: IndexName -> DocId -> IOE KengineError ()
   }
@@ -79,7 +82,9 @@ mkFileStore' dir =
     , readSnapshot = readSnapshot' dir
     , indexDir = pathToIdx dir
     , readDiskFieldIndex = readDiskFieldIndex' dir
+    , readDiskDoc = readDiskDoc' dir
     , readSnapshotFieldIndex = readSnapshotFieldIndex' dir
+    , readSnapshotDocs = readSnapshotDocs' dir
     , writePendingSnapshot = writePendingSnapshot' dir
     , readPendingSnapshotSegment = readPendingSnapshotSegment' dir
     , commitPendingSnapshot = commitPendingSnapshot' dir
@@ -111,7 +116,7 @@ readDocs' dir idxName =
 readSnapshot' ::
   FilePath ->
   IndexName ->
-  IOE KengineError (Maybe (Header, DocStore, SparseIndex, DocSparseIndex, FieldStats))
+  IOE KengineError (Maybe (Header, SparseIndex, DocSparseIndex, FieldStats))
 readSnapshot' dir idxName =
   readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> snapshotFile)
 
@@ -130,9 +135,21 @@ readDiskFieldIndex' dir idxName (Segment{fieldNames}) location = do
           <$> blockOfTokens
   pure (foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty indexPerEntry)
 
+readDiskDoc' ::
+  FilePath -> IndexName -> BlockLocation -> IOE KengineError DocStore
+readDiskDoc' dir idxName location = do
+  documentBlock <-
+    readAtBlockLocation docDecode (pathToIdx dir idxName </> snapshotFile) location
+  pure $ Map.fromList ((\doc -> (doc.docId, doc)) <$> documentBlock)
+
+-- pure (foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty indexPerEntry)
+
 readSnapshotFieldIndex' :: FilePath -> IndexName -> IOE KengineError (Maybe FieldIndex)
 readSnapshotFieldIndex' dir idxName =
   readForIdxFile fieldIndexDecode (pathToIdx dir idxName </> snapshotFile)
+
+readSnapshotDocs' :: FilePath -> IndexName -> IOE KengineError (Maybe DocStore)
+readSnapshotDocs' dir idxName = readForIdxFile docsDecode (pathToIdx dir idxName </> snapshotFile)
 
 writePendingSnapshot' ::
   FilePath ->
@@ -142,9 +159,9 @@ writePendingSnapshot' ::
 writePendingSnapshot' dir idxName = writeFullFile snapshotEnCodec dir idxName pendingSnapshotFile
 
 readPendingSnapshotSegment' ::
-  FilePath -> IndexName -> IOE KengineError (SparseIndex, [FieldName])
+  FilePath -> IndexName -> IOE KengineError Segment
 readPendingSnapshotSegment' dir idxName =
-  M.maybe (Map.empty, []) (\(h, _, b, _, _) -> (b, h.fieldNames))
+  M.maybe (Segment Map.empty [] Map.empty) (\(h, b, dss, _) -> Segment b h.fieldNames dss)
     <$> readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> pendingSnapshotFile)
 
 commitPendingSnapshot' :: FilePath -> IndexName -> IOE KengineError ()
@@ -233,12 +250,13 @@ jsonLDeCodec =
 snapshotEnCodec :: EnCodec (DocStore, FieldIndex, FieldStats)
 snapshotEnCodec = EnCodec{encode = \(a, b, c) -> encodeState a b c}
 
-snapshotDeCodec :: DeCodec (Header, DocStore, SparseIndex, DocSparseIndex, FieldStats)
+-- todo smarter reading, skip eading docstore
+snapshotDeCodec :: DeCodec (Header, SparseIndex, DocSparseIndex, FieldStats)
 snapshotDeCodec =
   DeCodec
     { decode =
         first (FileError . T.pack)
-          . fmap (\(h, ds, _fi, si, dsi, fs) -> (h, ds, si, dsi, fs))
+          . fmap (\(h, _ds, _fi, si, dsi, fs) -> (h, si, dsi, fs))
           . decodeSnapshot
     }
 
@@ -248,5 +266,14 @@ fieldIndexDecode =
     { decode = first (FileError . T.pack) . fmap (\(_, _, f, _, _, _) -> f) . decodeSnapshot
     }
 
+docsDecode :: DeCodec DocStore
+docsDecode =
+  DeCodec
+    { decode = first (FileError . T.pack) . fmap (\(_, ds, _, _, _, _) -> ds) . decodeSnapshot
+    }
+
 blockDecode :: DeCodec [TokenEntry]
 blockDecode = DeCodec{decode = first (FileError . T.pack) . decodeTokenEntry}
+
+docDecode :: DeCodec [Document]
+docDecode = DeCodec{decode = first (FileError . T.pack) . decodeDocument}

@@ -5,6 +5,7 @@ module Kengine.Persistence.Binary (
   decodeTokenEntry,
   putDocument,
   decodeSnapshot,
+  decodeDocument,
   getMany,
   getDocument,
   putHeader,
@@ -333,6 +334,9 @@ buildBlockLocations sectionFirstByte wholeSectionSize firstEntryOffsets =
 
 decodeTokenEntry :: BS.ByteString -> Either String [TokenEntry]
 decodeTokenEntry = C.runGet (getMany getTokenEntry)
+
+decodeDocument :: BS.ByteString -> Either String [Document]
+decodeDocument = C.runGet (getMany getDocument)
 
 data Header = Header
   { version :: Word8

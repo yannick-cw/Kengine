@@ -2,7 +2,9 @@
 
 module Test.Search (spec) where
 
+import Control.Monad.Trans.Except (runExceptT)
 import Data.Map qualified as Map
+import Kengine.Errors (IOE)
 import Kengine.Search (searchQ)
 import Kengine.Types (
   DocFieldStats (DocFieldStats),
@@ -40,7 +42,8 @@ spec = do
         fieldName :: FieldName = $$(R.refineTH "search_field")
         docStore =
           Map.fromList $
-            (\idx -> (DocId idx, Document{docId = DocId idx, body = Map.singleton fieldName (TextVal "")}))
+            ( \idx -> (DocId idx, Document{docId = DocId idx, body = Map.singleton fieldName (TextVal "")})
+            )
               <$> [1 .. 20]
         fieldIndex =
           Map.singleton
@@ -50,17 +53,20 @@ spec = do
           Map.singleton
             fieldName
             (Map.fromList [(DocId 1, DocFieldStats 5), (DocId 2, DocFieldStats 10)])
-        searchRes = searchQ [Token "test"] docStore fieldIndex fieldMeta
+        searchResIO = searchQ [Token "test"] docStore fieldIndex fieldMeta (\_ -> pure Nothing)
         idf = log ((2 - 2 + 0.5) / (2 + 0.5) + 1)
         doc1 = idf * (10 * (1.2 + 1)) / (10 + 1.2 * (1 - 0.75 + 0.75 * (5 / 7.5)))
         doc2 = idf * (5 * (1.2 + 1)) / (5 + 1.2 * (1 - 0.75 + 0.75 * (10 / 7.5)))
        in
-        (\SearchResult{score = Score s} -> s) <$> searchRes
-          `shouldBe` [doc1, doc2]
+        do
+          searchRes <- runIOE searchResIO
+          (\SearchResult{score = Score s} -> s) <$> searchRes `shouldBe` [doc1, doc2]
+
     it "matches ALL query terms" $
       let
         docStore =
-          Map.fromList $ (\idx -> (DocId idx, Document{docId = DocId idx, body = Map.empty})) <$> [1 .. 20]
+          Map.fromList $
+            (\idx -> (DocId idx, Document{docId = DocId idx, body = Map.empty})) <$> [1 .. 20]
         fieldName :: FieldName = $$(R.refineTH "search_field")
         fieldIndex =
           Map.singleton
@@ -74,6 +80,11 @@ spec = do
           Map.singleton
             fieldName
             (Map.fromList [(DocId 1, DocFieldStats 5), (DocId 2, DocFieldStats 10)])
-        searchRes = searchQ [Token "and", Token "test"] docStore fieldIndex fieldMeta
+        searchResIO = searchQ [Token "and", Token "test"] docStore fieldIndex fieldMeta (\_ -> pure Nothing)
        in
-        length searchRes `shouldBe` 1
+        do
+          searchRes <- runIOE searchResIO
+          length searchRes `shouldBe` 1
+
+runIOE :: (Show e) => IOE e a -> IO a
+runIOE m = runExceptT m >>= either (fail . show) pure
