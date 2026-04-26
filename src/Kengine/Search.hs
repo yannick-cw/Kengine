@@ -21,6 +21,8 @@ import Kengine.Types (
   Token,
  )
 
+-- todo we should not pass docstore and metadata at all - it should come from a unified search interface that internally
+-- resolves wherever search comes from
 searchQ ::
   [Token] ->
   DocStore ->

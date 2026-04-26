@@ -30,15 +30,18 @@ import Kengine.Persistence.Binary (Header (..))
 import Kengine.Persistence.FileStore (FileStore (..))
 import Kengine.Types (
   BlockLocation (..),
+  DocFieldStats (..),
   DocId (..),
   DocSparseIndex,
   Field (..),
   FieldIndex,
+  FieldStats,
   IndexData (..),
   IndexName,
   IndexView,
   Mapping (..),
   Memtable (..),
+  Segment (..),
   SparseIndex,
   Token (..),
  )
@@ -115,51 +118,56 @@ renderPage ::
   B.Builder
 renderPage name idxData mergedFi snapPath snap walPath wal =
   pageStart name
+    <> renderSummary idxData snap wal
     <> renderMapping idxData.mapping
+    <> renderFieldStats idxData.memtable.fieldMeta
     <> renderMemtable idxData.memtable
+    <> renderSegmentView idxData.segment
     <> renderInvertedIndex mergedFi
+    <> renderTopTokens mergedFi
     <> renderSnapshot snapPath snap
-    <> renderSparseIndex snap
+    <> renderTermSparseSample snap
+    <> renderDocSparseSample snap
     <> renderWal walPath wal
     <> pageEnd
 
-pageStart :: IndexName -> B.Builder
-pageStart name =
-  raw "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>kengine layout: "
-    <> escT (unrefine name)
-    <> raw "</title>"
-    <> raw css
-    <> raw "</head><body><h1>"
-    <> escT (unrefine name)
-    <> raw "</h1>"
+-- summary -------------------------------------------------------------------
 
-pageEnd :: B.Builder
-pageEnd = raw "</body></html>"
+renderSummary :: IndexData -> SnapshotInfo -> WalInfo -> B.Builder
+renderSummary idxData snap wal =
+  raw "<section class=\"summary\">"
+    <> card "memtable docs" (formatNum (Map.size idxData.memtable.docStore))
+    <> card "snapshot docs" snapDocCount
+    <> card "snapshot size" snapSize
+    <> card "wal entries" walEntries
+    <> card "max doc id" (let DocId d = idxData.maxDocId in formatNum d)
+    <> card
+      "fields tracked"
+      (formatNum (Map.size idxData.memtable.fieldMeta))
+    <> raw "</section>"
+  where
+    snapDocCount = case snap of
+      NoSnapshot -> raw "—"
+      GoodSnapshot _ h _ _ -> formatNum (fromIntegral h.docCount :: Int)
+    snapSize = case snap of
+      NoSnapshot -> raw "—"
+      GoodSnapshot sz _ _ _ -> formatBytes sz
+    walEntries = case wal of
+      NoWal -> raw "—"
+      HasWal _ n _ -> formatNum n
+    card label val =
+      raw "<div class=\"card\"><div class=\"card-label\">"
+        <> raw label
+        <> raw "</div><div class=\"card-value\">"
+        <> val
+        <> raw "</div></div>"
 
-css :: Text
-css =
-  T.concat
-    [ "<style>"
-    , "body{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;max-width:980px;margin:1.5em auto;padding:0 1em;color:#222}"
-    , "h1{font-size:18px;margin:0 0 .25em}"
-    , "h2{font-size:13px;margin:1.4em 0 .35em;border-bottom:1px solid #ddd;padding-bottom:2px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}"
-    , "table{border-collapse:collapse;width:100%}"
-    , "td,th{padding:2px 12px 2px 0;vertical-align:top;text-align:left}"
-    , "th{font-weight:600;color:#555}"
-    , ".num{font-variant-numeric:tabular-nums;text-align:right;padding-right:0;white-space:nowrap}"
-    , ".muted{color:#888;font-weight:400}"
-    , ".path{color:#666;font-size:11px;margin-bottom:.4em;word-break:break-all}"
-    , ".bar{display:flex;height:20px;border:1px solid #bbb;border-radius:2px;overflow:hidden;margin:.4em 0}"
-    , ".bar>div{display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;white-space:nowrap;overflow:hidden;text-shadow:0 1px 0 rgba(0,0,0,.3)}"
-    , ".sw{display:inline-block;width:10px;height:10px;border-radius:1px;margin-right:.3em;vertical-align:middle}"
-    , "code{font-family:ui-monospace,monospace;background:#f5f5f5;padding:0 4px;border-radius:2px}"
-    , "pre.tail{background:#f5f5f5;padding:6px;font-size:11px;white-space:pre-wrap;word-break:break-all;margin:.3em 0;max-height:9em;overflow:hidden}"
-    , "</style>"
-    ]
+-- mapping -------------------------------------------------------------------
 
 renderMapping :: Mapping -> B.Builder
 renderMapping (Mapping fields) =
-  raw "<h2>mapping</h2><table><tr><th>field</th><th>type</th><th>required</th></tr>"
+  section "mapping" Nothing
+    <> raw "<table><tr><th>field</th><th>type</th><th>required</th></tr>"
     <> mconcat (row <$> Nel.toList fields)
     <> raw "</table>"
   where
@@ -169,35 +177,112 @@ renderMapping (Mapping fields) =
         <> raw "</code></td><td>"
         <> B.fromString (show sType)
         <> raw "</td><td>"
-        <> raw (if required then "yes" else "no")
+        <> raw (if required then "yes" else "—")
         <> raw "</td></tr>"
 
+-- field stats (BM25 corpus) -------------------------------------------------
+
+renderFieldStats :: FieldStats -> B.Builder
+renderFieldStats fs
+  | Map.null fs = mempty
+  | otherwise =
+      section
+        "field stats"
+        (Just "in-memory, full corpus (BM25 inputs); never pruned")
+        <> raw "<table><tr><th>field</th>"
+        <> raw "<th class=\"num\">docs</th>"
+        <> raw "<th class=\"num\">total tokens</th>"
+        <> raw "<th class=\"num\">avgdl</th>"
+        <> raw "<th class=\"num\">memory ≈</th>"
+        <> raw "</tr>"
+        <> mconcat (renderRow <$> Map.toAscList fs)
+        <> totalsRow
+        <> raw "</table>"
+  where
+    renderRow (fn, perDoc) =
+      let
+        n = Map.size perDoc
+        total = sum [t | DocFieldStats t <- Map.elems perDoc]
+        avgdl :: Double
+        avgdl = if n == 0 then 0 else fromIntegral total / fromIntegral n
+        bytes = approxFieldStatsBytes n
+       in
+        raw "<tr><td><code>"
+          <> escT (unrefine fn)
+          <> raw "</code></td><td class=\"num\">"
+          <> formatNum n
+          <> raw "</td><td class=\"num\">"
+          <> formatNum total
+          <> raw "</td><td class=\"num\">"
+          <> formatFloat 1 avgdl
+          <> raw "</td><td class=\"num muted\">"
+          <> formatBytes bytes
+          <> raw "</td></tr>"
+    totalEntries = sum (Map.size <$> Map.elems fs)
+    totalBytes = approxFieldStatsBytes totalEntries
+    totalsRow =
+      raw "<tr class=\"totals\"><td><strong>total</strong></td>"
+        <> raw "<td class=\"num\">"
+        <> formatNum totalEntries
+        <> raw "</td><td class=\"num muted\" colspan=\"2\">—</td>"
+        <> raw "<td class=\"num\">"
+        <> formatBytes totalBytes
+        <> raw "</td></tr>"
+
+-- Rough memory estimate for one (DocId, DocFieldStats) entry in a Map.
+-- Map node + key Int + value Int. Real footprint differs, this is a hint, not a measurement.
+approxFieldStatsBytes :: Int -> Integer
+approxFieldStatsBytes n = fromIntegral n * 56
+
+-- memtable ------------------------------------------------------------------
+
 renderMemtable :: Memtable -> B.Builder
-renderMemtable Memtable{docStore, fieldIdx, fieldMeta} =
-  raw "<h2>memtable <span class=\"muted\">in-memory, since last flush</span></h2><table>"
+renderMemtable Memtable{docStore, fieldIdx} =
+  section
+    "memtable"
+    (Just "in-memory writes since last flush; pruned on flush")
+    <> raw "<table>"
     <> kv "documents" (formatNum (Map.size docStore))
     <> kv "fields with postings" (formatNum (Map.size fieldIdx))
     <> kv "distinct (field, term) pairs" (formatNum totalTerms)
     <> kv "postings entries (term, doc)" (formatNum totalPostings)
-    <> kv "fields with stats" (formatNum (Map.size fieldMeta))
     <> raw "</table>"
   where
     totalTerms = sum (Map.size <$> Map.elems fieldIdx)
     totalPostings =
       sum (sum . fmap Map.size . Map.elems <$> Map.elems fieldIdx)
 
+-- segment in-memory view ----------------------------------------------------
+
+renderSegmentView :: Segment -> B.Builder
+renderSegmentView Segment{sparseIndex, docsSparseIndex, fieldNames} =
+  section
+    "segment view"
+    (Just "in-memory pointers to the on-disk snapshot")
+    <> raw "<table>"
+    <> kv "term sparse anchors" (formatNum (Map.size sparseIndex))
+    <> kv "doc sparse anchors" (formatNum (Map.size docsSparseIndex))
+    <> kv
+      "field names"
+      (if null fieldNames then raw "—" else escT (T.intercalate ", " (unrefine <$> fieldNames)))
+    <> raw "</table>"
+
+-- inverted index merged -----------------------------------------------------
+
 renderInvertedIndex :: FieldIndex -> B.Builder
 renderInvertedIndex fi
   | Map.null fi = mempty
-  | otherwise = renderFieldSummary fi <> renderTopTokens fi
-
-renderFieldSummary :: FieldIndex -> B.Builder
-renderFieldSummary fi =
-  raw "<h2>inverted index <span class=\"muted\">memtable + on-disk, merged</span></h2>"
-    <> raw
-      "<table><tr><th>field</th><th class=\"num\">tokens</th><th class=\"num\">postings</th><th class=\"num\">max df</th><th>most common token</th></tr>"
-    <> mconcat (renderRow <$> Map.toAscList fi)
-    <> raw "</table>"
+  | otherwise =
+      section
+        "inverted index"
+        (Just "memtable + on-disk merged")
+        <> raw "<table><tr><th>field</th>"
+        <> raw "<th class=\"num\">tokens</th>"
+        <> raw "<th class=\"num\">postings</th>"
+        <> raw "<th class=\"num\">max df</th>"
+        <> raw "<th>most common token</th></tr>"
+        <> mconcat (renderRow <$> Map.toAscList fi)
+        <> raw "</table>"
   where
     renderRow (fn, tm) =
       let
@@ -218,7 +303,7 @@ renderFieldSummary fi =
           <> raw "</td><td>"
           <> renderMost ranked
           <> raw "</td></tr>"
-    renderMost [] = raw "-"
+    renderMost [] = raw "—"
     renderMost ((Token t, df) : _) =
       raw "<code>"
         <> escT t
@@ -230,11 +315,9 @@ renderTopTokens :: FieldIndex -> B.Builder
 renderTopTokens fi
   | null flat = mempty
   | otherwise =
-      raw "<h2>top tokens by document frequency <span class=\"muted\">top "
-        <> B.decimal (length top)
-        <> raw " of "
-        <> B.decimal (length flat)
-        <> raw "</span></h2>"
+      section
+        "top tokens by document frequency"
+        (Just (T.pack ("top " <> show (length top) <> " of " <> show (length flat))))
         <> raw "<table><tr><th>field</th><th>token</th><th class=\"num\">df</th></tr>"
         <> mconcat
           [ raw "<tr><td><code>"
@@ -249,15 +332,17 @@ renderTopTokens fi
         <> raw "</table>"
   where
     flat = [(fn, tk, Map.size pl) | (fn, tm) <- Map.toList fi, (tk, pl) <- Map.toList tm]
-    top = take 10 (L.sortOn (\(_, _, df) -> Down df) flat)
+    top = take 15 (L.sortOn (\(_, _, df) -> Down df) flat)
+
+-- snapshot file -------------------------------------------------------------
 
 renderSnapshot :: FilePath -> SnapshotInfo -> B.Builder
 renderSnapshot path NoSnapshot =
-  raw "<h2>snapshot</h2>"
+  section "snapshot file" (Just "on-disk")
     <> pathLine path
     <> raw "<p class=\"muted\">no snapshot yet. POST /flush-state to write one.</p>"
 renderSnapshot path (GoodSnapshot sz h sparse _docSparse) =
-  raw "<h2>snapshot</h2>"
+  section "snapshot file" (Just "on-disk")
     <> pathLine path
     <> raw "<table>"
     <> kv "size" (formatBytes sz)
@@ -265,7 +350,7 @@ renderSnapshot path (GoodSnapshot sz h sparse _docSparse) =
     <> kv "mappingVersion" (formatNum (fromIntegral h.mappingVersion :: Int))
     <> kv "docCount" (formatNum (fromIntegral h.docCount :: Int))
     <> kv "fieldNames" (escT (T.intercalate ", " (unrefine <$> h.fieldNames)))
-    <> kv "sparse index entries" (formatNum (Map.size sparse))
+    <> kv "term sparse anchors" (formatNum (Map.size sparse))
     <> raw "</table>"
     <> renderLayoutBar sections
     <> renderSectionTable sections
@@ -276,7 +361,7 @@ snapshotSections :: Integer -> Header -> [(Text, Text, Int, Int)]
 snapshotSections sz h =
   [ ("header + token blocks", "#ed7d31", 0, fromIntegral h.termSparseOffset)
   ,
-    ( "sparse index"
+    ( "term sparse index"
     , "#a5a5a5"
     , fromIntegral h.termSparseOffset
     , fromIntegral h.storedFieldsOffset
@@ -287,7 +372,13 @@ snapshotSections sz h =
     , fromIntegral h.storedFieldsOffset
     , fromIntegral h.docMetadataOffset
     )
-  , ("field metadata", "#ffc000", fromIntegral h.docMetadataOffset, fromIntegral sz)
+  ,
+    ( "field metadata"
+    , "#ffc000"
+    , fromIntegral h.docMetadataOffset
+    , fromIntegral h.docSparseOffset
+    )
+  , ("doc sparse index", "#5b9bd5", fromIntegral h.docSparseOffset, fromIntegral sz)
   ]
 
 renderLayoutBar :: [(Text, Text, Int, Int)] -> B.Builder
@@ -331,21 +422,26 @@ renderSectionTable secs =
       ]
     <> raw "</table>"
 
-renderSparseIndex :: SnapshotInfo -> B.Builder
-renderSparseIndex (GoodSnapshot _ _ sparse docSparse) =
-  renderTermSparse sparse <> renderDocSparse docSparse
-renderSparseIndex _ = mempty
+renderTermSparseSample :: SnapshotInfo -> B.Builder
+renderTermSparseSample (GoodSnapshot _ _ sparse _) = termSparseTable sparse
+renderTermSparseSample _ = mempty
 
-renderTermSparse :: SparseIndex -> B.Builder
-renderTermSparse sparse
+renderDocSparseSample :: SnapshotInfo -> B.Builder
+renderDocSparseSample (GoodSnapshot _ _ _ docSparse) = docSparseTable docSparse
+renderDocSparseSample _ = mempty
+
+termSparseTable :: SparseIndex -> B.Builder
+termSparseTable sparse
   | Map.null sparse = mempty
   | otherwise =
       let entries = take 10 (Map.toList sparse)
-       in raw "<h2>term sparse index <span class=\"muted\">first "
-            <> B.decimal (length entries)
-            <> raw " of "
-            <> B.decimal (Map.size sparse)
-            <> raw " block anchors</span></h2>"
+       in section
+            "term sparse index"
+            ( Just
+                ( T.pack
+                    ("first " <> show (length entries) <> " of " <> show (Map.size sparse) <> " block anchors")
+                )
+            )
             <> raw
               "<table><tr><th>field</th><th>token (block start)</th><th class=\"num\">byte offset</th><th class=\"num\">block size</th></tr>"
             <> mconcat
@@ -362,16 +458,18 @@ renderTermSparse sparse
               ]
             <> raw "</table>"
 
-renderDocSparse :: DocSparseIndex -> B.Builder
-renderDocSparse docSparse
+docSparseTable :: DocSparseIndex -> B.Builder
+docSparseTable docSparse
   | Map.null docSparse = mempty
   | otherwise =
       let entries = take 10 (Map.toList docSparse)
-       in raw "<h2>doc sparse index <span class=\"muted\">first "
-            <> B.decimal (length entries)
-            <> raw " of "
-            <> B.decimal (Map.size docSparse)
-            <> raw " block anchors</span></h2>"
+       in section
+            "doc sparse index"
+            ( Just
+                ( T.pack
+                    ("first " <> show (length entries) <> " of " <> show (Map.size docSparse) <> " block anchors")
+                )
+            )
             <> raw
               "<table><tr><th>first docId in block</th><th class=\"num\">byte offset</th><th class=\"num\">block size</th></tr>"
             <> mconcat
@@ -386,13 +484,15 @@ renderDocSparse docSparse
               ]
             <> raw "</table>"
 
+-- WAL -----------------------------------------------------------------------
+
 renderWal :: FilePath -> WalInfo -> B.Builder
 renderWal path NoWal =
-  raw "<h2>write-ahead log</h2>"
+  section "write-ahead log" Nothing
     <> pathLine path
     <> raw "<p class=\"muted\">no log file.</p>"
 renderWal path (HasWal sz entryCount tailLines) =
-  raw "<h2>write-ahead log</h2>"
+  section "write-ahead log" Nothing
     <> pathLine path
     <> raw "<table>"
     <> kv "size" (formatBytes sz)
@@ -406,6 +506,58 @@ renderWal path (HasWal sz entryCount tailLines) =
           <> raw "</pre>"
   where
     truncateLine t = if T.length t > 220 then T.take 217 t <> "..." else t
+
+-- shell ---------------------------------------------------------------------
+
+pageStart :: IndexName -> B.Builder
+pageStart name =
+  raw "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>kengine layout: "
+    <> escT (unrefine name)
+    <> raw "</title>"
+    <> raw css
+    <> raw "</head><body><h1>"
+    <> escT (unrefine name)
+    <> raw "</h1>"
+
+pageEnd :: B.Builder
+pageEnd = raw "</body></html>"
+
+section :: Text -> Maybe Text -> B.Builder
+section title Nothing = raw "<h2>" <> raw title <> raw "</h2>"
+section title (Just sub) =
+  raw "<h2>"
+    <> raw title
+    <> raw " <span class=\"muted\">"
+    <> escT sub
+    <> raw "</span></h2>"
+
+css :: Text
+css =
+  T.concat
+    [ "<style>"
+    , ":root{--fg:#222;--muted:#888;--accent:#5b9bd5;--rule:#e5e5e5;--card-bg:#f5f5f5}"
+    , "*{box-sizing:border-box}"
+    , "body{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;max-width:1100px;margin:1.5em auto;padding:0 1em;color:var(--fg)}"
+    , "h1{font-size:18px;margin:0 0 .25em}"
+    , "h2{font-size:13px;margin:1.6em 0 .5em;border-bottom:1px solid var(--rule);padding-bottom:3px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}"
+    , "table{border-collapse:collapse;width:100%}"
+    , "td,th{padding:3px 14px 3px 0;vertical-align:top;text-align:left}"
+    , "th{font-weight:600;color:#555;font-size:11px;text-transform:uppercase;letter-spacing:.03em}"
+    , "tr.totals td{border-top:1px solid var(--rule);padding-top:6px;color:#444}"
+    , ".num{font-variant-numeric:tabular-nums;text-align:right;padding-right:0;white-space:nowrap}"
+    , ".muted{color:var(--muted);font-weight:400}"
+    , ".path{color:#666;font-size:11px;margin:.2em 0 .5em;word-break:break-all}"
+    , ".bar{display:flex;height:22px;border:1px solid #bbb;border-radius:3px;overflow:hidden;margin:.6em 0}"
+    , ".bar>div{display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;white-space:nowrap;overflow:hidden;text-shadow:0 1px 0 rgba(0,0,0,.3)}"
+    , ".sw{display:inline-block;width:10px;height:10px;border-radius:1px;margin-right:.4em;vertical-align:middle}"
+    , "code{font-family:ui-monospace,monospace;background:var(--card-bg);padding:0 4px;border-radius:2px}"
+    , "pre.tail{background:var(--card-bg);padding:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;margin:.3em 0;max-height:9em;overflow:auto}"
+    , ".summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6em;margin:.6em 0 1.2em}"
+    , ".card{background:var(--card-bg);border-radius:4px;padding:.6em .8em;border-left:3px solid var(--accent)}"
+    , ".card-label{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}"
+    , ".card-value{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:.15em}"
+    , "</style>"
+    ]
 
 -- helpers -------------------------------------------------------------------
 
@@ -427,6 +579,9 @@ formatBytes n
   where
     decimal2 :: Double -> B.Builder
     decimal2 d = B.fromString (showFFloat (Just 2) d "")
+
+formatFloat :: Int -> Double -> B.Builder
+formatFloat digits d = B.fromString (showFFloat (Just digits) d "")
 
 formatNum :: Int -> B.Builder
 formatNum = B.fromString . groupThousands . show

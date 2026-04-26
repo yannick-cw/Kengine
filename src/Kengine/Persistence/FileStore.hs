@@ -25,7 +25,6 @@ import Kengine.Types (
   DocStore,
   Document (..),
   FieldIndex,
-  FieldName,
   FieldStats,
   IndexName,
   Mapping,
