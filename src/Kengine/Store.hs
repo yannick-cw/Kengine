@@ -8,13 +8,13 @@ import Data.Map qualified as Map
 import Data.Maybe qualified as M
 import Data.Ord (Down (Down))
 import Data.Text qualified as T
+import Data.Text.Lazy qualified as LT
 import GHC.Conc qualified as TVar
+import Kengine.Debug.Layout qualified as Layout
 import Kengine.Errors (IOE, KengineError (FileError, SearchError))
 import Kengine.Index.Document (parseDocument)
 import Kengine.Index.Update (updateIndex)
 import Kengine.Mapping (validateMapping)
-import Data.Text.Lazy qualified as LT
-import Kengine.Debug.Layout qualified as Layout
 import Kengine.Persistence.Binary (Header (..))
 import Kengine.Persistence.FileStore (FileStore (..))
 import Kengine.Persistence.Flush (flushSegment)
@@ -23,6 +23,7 @@ import Kengine.Tokenize (tokenize)
 import Kengine.Types (
   BlockLocation,
   DocId (DocId),
+  DocSparseIndex,
   DocStore,
   Document (..),
   FieldStats,
@@ -35,7 +36,7 @@ import Kengine.Types (
   Memtable (..),
   Query (..),
   SearchResults (..),
-  Segment (Segment),
+  Segment (..),
   SparseIndex,
   Token,
  )
@@ -164,13 +165,13 @@ lookupIndex name indexView =
       (Map.lookup name indexView)
 
 resolveSparseIdx :: [Token] -> Segment -> [BlockLocation]
-resolveSparseIdx tkns (Segment sparseIdx fieldnames) =
+resolveSparseIdx tkns Segment{sparseIndex, fieldNames} =
   snd
     <$> M.catMaybes
       ( do
-          fn <- fieldnames
+          fn <- fieldNames
           tkn <- tkns
-          pure $ Map.lookupLE (fn, tkn) sparseIdx
+          pure $ Map.lookupLE (fn, tkn) sparseIndex
       )
 
 createEmptyIdxData :: Mapping -> IndexData
@@ -178,19 +179,19 @@ createEmptyIdxData validMapping =
   IndexData
     { mapping = validMapping
     , memtable = Memtable{docStore = Map.empty, fieldIdx = Map.empty, fieldMeta = Map.empty}
-    , segment = Segment Map.empty []
+    , segment = Segment Map.empty [] Map.empty
     }
 
 createInitialIdxData ::
   Mapping ->
-  Maybe (Header, DocStore, SparseIndex, FieldStats) ->
+  Maybe (Header, DocStore, SparseIndex, DocSparseIndex, FieldStats) ->
   [Document] ->
   IndexData
 createInitialIdxData validMapping snapshot docsFromLog =
   let
-    (docsFromSnapshot, sparseIndex, fieldMeta, fieldNames) = case snapshot of
-      Nothing -> (Map.empty, Map.empty, Map.empty, [])
-      Just (h, ds, si, fs) -> (ds, si, fs, h.fieldNames)
+    (docsFromSnapshot, sparseIndex, fieldMeta, fieldNames, docSparse) = case snapshot of
+      Nothing -> (Map.empty, Map.empty, Map.empty, [], Map.empty)
+      Just (h, ds, si, dsi, fs) -> (ds, si, fs, h.fieldNames, dsi)
     docStore = Map.union docsFromSnapshot docsFromAppendLog
     -- this should in practice just be `docsFromAppendLog` - but in case of crash
     -- append log docs would have not been cleaned up
@@ -204,7 +205,7 @@ createInitialIdxData validMapping snapshot docsFromLog =
     IndexData
       { mapping = validMapping
       , memtable = Memtable{docStore, fieldIdx = updatedFieldIdx, fieldMeta = updatedFieldMeta}
-      , segment = Segment sparseIndex fieldNames
+      , segment = Segment sparseIndex fieldNames docSparse
       }
   where
     docsFromAppendLog :: Map.Map DocId Document

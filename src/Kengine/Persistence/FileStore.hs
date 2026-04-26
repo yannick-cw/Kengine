@@ -20,6 +20,7 @@ import Kengine.Persistence.Binary (
 import Kengine.Types (
   BlockLocation (..),
   DocId,
+  DocSparseIndex,
   DocStore,
   Document (..),
   FieldIndex,
@@ -52,7 +53,8 @@ data FileStore = FileStore
   , storeDoc :: IndexName -> Document -> IOE KengineError ()
   , readDocs :: IndexName -> IOE KengineError [Document]
   , readSnapshot ::
-      IndexName -> IOE KengineError (Maybe (Header, DocStore, SparseIndex, FieldStats))
+      IndexName ->
+      IOE KengineError (Maybe (Header, DocStore, SparseIndex, DocSparseIndex, FieldStats))
   , indexDir :: IndexName -> FilePath
   , readDiskFieldIndex :: IndexName -> Segment -> BlockLocation -> IOE KengineError FieldIndex
   , readSnapshotFieldIndex :: IndexName -> IOE KengineError (Maybe FieldIndex)
@@ -109,13 +111,13 @@ readDocs' dir idxName =
 readSnapshot' ::
   FilePath ->
   IndexName ->
-  IOE KengineError (Maybe (Header, DocStore, SparseIndex, FieldStats))
+  IOE KengineError (Maybe (Header, DocStore, SparseIndex, DocSparseIndex, FieldStats))
 readSnapshot' dir idxName =
   readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> snapshotFile)
 
 readDiskFieldIndex' ::
   FilePath -> IndexName -> Segment -> BlockLocation -> IOE KengineError FieldIndex
-readDiskFieldIndex' dir idxName (Segment _ fieldNames) location = do
+readDiskFieldIndex' dir idxName (Segment{fieldNames}) location = do
   let fieldNameLookup = Map.fromList $ zip [0 :: Word16 ..] fieldNames
   blockOfTokens <-
     readAtBlockLocation blockDecode (pathToIdx dir idxName </> snapshotFile) location
@@ -142,7 +144,7 @@ writePendingSnapshot' dir idxName = writeFullFile snapshotEnCodec dir idxName pe
 readPendingSnapshotSegment' ::
   FilePath -> IndexName -> IOE KengineError (SparseIndex, [FieldName])
 readPendingSnapshotSegment' dir idxName =
-  M.maybe (Map.empty, []) (\(h, _, b, _) -> (b, h.fieldNames))
+  M.maybe (Map.empty, []) (\(h, _, b, _, _) -> (b, h.fieldNames))
     <$> readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> pendingSnapshotFile)
 
 commitPendingSnapshot' :: FilePath -> IndexName -> IOE KengineError ()
@@ -231,12 +233,12 @@ jsonLDeCodec =
 snapshotEnCodec :: EnCodec (DocStore, FieldIndex, FieldStats)
 snapshotEnCodec = EnCodec{encode = \(a, b, c) -> encodeState a b c}
 
-snapshotDeCodec :: DeCodec (Header, DocStore, SparseIndex, FieldStats)
+snapshotDeCodec :: DeCodec (Header, DocStore, SparseIndex, DocSparseIndex, FieldStats)
 snapshotDeCodec =
   DeCodec
     { decode =
         first (FileError . T.pack)
-          . fmap (\(h, ds, _fi, si, _dsi, fs) -> (h, ds, si, fs))
+          . fmap (\(h, ds, _fi, si, dsi, fs) -> (h, ds, si, dsi, fs))
           . decodeSnapshot
     }
 

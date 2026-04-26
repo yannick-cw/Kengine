@@ -29,6 +29,8 @@ import Kengine.Persistence.Binary (Header (..))
 import Kengine.Persistence.FileStore (FileStore (..))
 import Kengine.Types (
   BlockLocation (..),
+  DocId (..),
+  DocSparseIndex,
   Field (..),
   FieldIndex,
   IndexData (..),
@@ -72,7 +74,7 @@ renderLayout fs viewVar name = do
 
 data SnapshotInfo
   = NoSnapshot
-  | GoodSnapshot Integer Header SparseIndex
+  | GoodSnapshot Integer Header SparseIndex DocSparseIndex
 
 data WalInfo = NoWal | HasWal Integer Int [Text]
 
@@ -81,9 +83,9 @@ readSnapshotInfo fs name path = do
   parsed <- fs.readSnapshot name
   case parsed of
     Nothing -> pure NoSnapshot
-    Just (h, _ds, sparse, _meta) -> do
+    Just (h, _ds, sparse, docSparse, _meta) -> do
       sz <- liftIO (getFileSize path)
-      pure (GoodSnapshot sz h sparse)
+      pure (GoodSnapshot sz h sparse docSparse)
 
 readWalInfo :: FilePath -> IO WalInfo
 readWalInfo path = do
@@ -252,7 +254,7 @@ renderSnapshot path NoSnapshot =
   raw "<h2>snapshot</h2>"
     <> pathLine path
     <> raw "<p class=\"muted\">no snapshot yet. POST /flush-state to write one.</p>"
-renderSnapshot path (GoodSnapshot sz h sparse) =
+renderSnapshot path (GoodSnapshot sz h sparse _docSparse) =
   raw "<h2>snapshot</h2>"
     <> pathLine path
     <> raw "<table>"
@@ -317,10 +319,16 @@ renderSectionTable secs =
     <> raw "</table>"
 
 renderSparseIndex :: SnapshotInfo -> B.Builder
-renderSparseIndex (GoodSnapshot _ _ sparse)
-  | not (Map.null sparse) =
+renderSparseIndex (GoodSnapshot _ _ sparse docSparse) =
+  renderTermSparse sparse <> renderDocSparse docSparse
+renderSparseIndex _ = mempty
+
+renderTermSparse :: SparseIndex -> B.Builder
+renderTermSparse sparse
+  | Map.null sparse = mempty
+  | otherwise =
       let entries = take 10 (Map.toList sparse)
-       in raw "<h2>sparse index <span class=\"muted\">first "
+       in raw "<h2>term sparse index <span class=\"muted\">first "
             <> B.decimal (length entries)
             <> raw " of "
             <> B.decimal (Map.size sparse)
@@ -339,7 +347,29 @@ renderSparseIndex (GoodSnapshot _ _ sparse)
               | ((fn, Token tk), BlockLocation{firstByte, size}) <- entries
               ]
             <> raw "</table>"
-renderSparseIndex _ = mempty
+
+renderDocSparse :: DocSparseIndex -> B.Builder
+renderDocSparse docSparse
+  | Map.null docSparse = mempty
+  | otherwise =
+      let entries = take 10 (Map.toList docSparse)
+       in raw "<h2>doc sparse index <span class=\"muted\">first "
+            <> B.decimal (length entries)
+            <> raw " of "
+            <> B.decimal (Map.size docSparse)
+            <> raw " block anchors</span></h2>"
+            <> raw "<table><tr><th>first docId in block</th><th class=\"num\">byte offset</th><th class=\"num\">block size</th></tr>"
+            <> mconcat
+              [ raw "<tr><td><code>"
+                  <> B.decimal dId
+                  <> raw "</code></td><td class=\"num\">"
+                  <> formatNum firstByte
+                  <> raw "</td><td class=\"num\">"
+                  <> formatBytes (fromIntegral size)
+                  <> raw "</td></tr>"
+              | (DocId dId, BlockLocation{firstByte, size}) <- entries
+              ]
+            <> raw "</table>"
 
 renderWal :: FilePath -> WalInfo -> B.Builder
 renderWal path NoWal =

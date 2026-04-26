@@ -59,5 +59,5 @@ flushSegment
         IndexData
           { mapping
           , memtable = freshMemtable{fieldIdx = prunedFieldIdx}
-          , segment = Segment sparseIdx fieldNames
+          , segment = Segment sparseIdx fieldNames Map.empty
           }

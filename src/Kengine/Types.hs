@@ -77,7 +77,11 @@ newtype DocFieldStats = DocFieldStats {totalTokens :: Int}
   deriving stock (Generic)
 
 data Memtable = Memtable {docStore :: DocStore, fieldIdx :: FieldIndex, fieldMeta :: FieldStats}
-data Segment = Segment SparseIndex [FieldName]
+data Segment = Segment
+  { sparseIndex :: SparseIndex
+  , fieldNames :: [FieldName]
+  , docsSparseIndex :: DocSparseIndex
+  }
 data IndexData = IndexData
   { mapping :: Mapping
   , memtable :: Memtable
