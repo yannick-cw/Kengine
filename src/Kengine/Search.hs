@@ -10,7 +10,6 @@ import Kengine.Types (
   DocFieldStats (..),
   DocId,
   DocStore,
-  Document,
   FieldIndex,
   FieldName,
   FieldStats,

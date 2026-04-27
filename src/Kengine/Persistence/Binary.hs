@@ -496,7 +496,9 @@ getDocument = do
   docId <- DocId . fromIntegral <$> C.getWord32be
   bodyLength <- C.getWord32be
   bodyBytes <- C.getBytes (fromIntegral bodyLength)
-  let body = B.decode (BS.fromStrict bodyBytes)
+  body <- case B.decodeOrFail (BS.fromStrict bodyBytes) of
+    Right (_, _, b) -> pure b
+    Left (_, _, err) -> fail ("fail decoding doc from bin data " <> err)
   pure Document{docId, body}
 
 data FieldMeta = FieldMeta {fieldId :: Word16, docId :: DocId, tokenCount :: Word32}

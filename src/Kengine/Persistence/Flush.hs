@@ -2,8 +2,6 @@ module Kengine.Persistence.Flush (flushSegment) where
 
 import Control.Monad.IO.Class (liftIO)
 import Data.Map qualified as Map
-import Data.Maybe (listToMaybe)
-import Data.Maybe qualified as M
 import GHC.Conc qualified as TVar
 import Kengine.Errors (IOE, KengineError)
 import Kengine.Persistence.FileStore (FileStore (..))
@@ -12,6 +10,8 @@ import Kengine.Types (
   IndexName,
   Memtable (..),
   Segment (..),
+  SegmentId (SegmentId),
+  newestSegment,
  )
 
 -- Flush the in-memory state of one index to disk and atomically swap the
@@ -19,54 +19,39 @@ import Kengine.Types (
 flushSegment :: FileStore -> IndexName -> TVar.TVar IndexData -> IOE KengineError ()
 flushSegment
   FileStore
-    { readSnapshotFieldIndex
-    , writePendingSnapshot
+    { writePendingSnapshot
     , truncateWAL
     , readPendingSnapshotSegment
-    , readSnapshotDocs
     , commitPendingSnapshot
     }
   idxName
   idxDataVar = do
     IndexData{memtable = Memtable{docStore, fieldIdx, fieldMeta}, maxDocId, segments} <-
       liftIO $ TVar.readTVarIO idxDataVar
-    -- todo just for in between
-    let snapshotFileName = "seg_00001.bin"
-    diskFieldIdx <- readSnapshotFieldIndex idxName snapshotFileName
-    diskDocs <- readSnapshotDocs idxName snapshotFileName
-    let completeDocStore = maybe docStore (Map.union docStore) diskDocs
-    let mergedFieldIdx =
-          Map.unionWith
-            (Map.unionWith Map.union)
-            fieldIdx
-            (M.fromMaybe Map.empty diskFieldIdx)
     -- unsafe version, overwrites old snapshot
-    writePendingSnapshot
-      idxName
-      (snapshotFileName ++ ".new")
-      (completeDocStore, mergedFieldIdx, fieldMeta)
+    let nextSegmentId = maybe (SegmentId 1) ((+) 1 . (.segNum)) (newestSegment segments)
+    -- write, rename flow, if during write crash -> no rename -> no corrupted file
+    writePendingSnapshot idxName nextSegmentId (docStore, fieldIdx, fieldMeta)
     -- read new sparse index + fieldnames
-    Segment{sparseIndex, docsSparseIndex, fieldNames} <-
-      readPendingSnapshotSegment idxName (snapshotFileName ++ ".new")
-    -- rename file,
-    commitPendingSnapshot idxName (snapshotFileName ++ ".new") snapshotFileName
+    newSeg <- readPendingSnapshotSegment idxName nextSegmentId
+    -- rename file, removes .new basically
+    commitPendingSnapshot idxName nextSegmentId
     -- atomically:  replace sparse idx + fieldnames, cleanup in mem fieldIdx with exisiting entries (only keep newer maxdocid)
     -- unsafe version, deletion of log entries
     truncateWAL idxName maxDocId
     liftIO $ TVar.atomically $ do
-      idxData@IndexData{memtable = freshMemtable} <-
-        TVar.readTVar idxDataVar
+      freshData <- TVar.readTVar idxDataVar
       let prunedFieldIdx =
             Map.filter (not . Map.null) $
               Map.map
                 ( Map.filter (not . Map.null)
                     . Map.map (Map.filterWithKey (\d _ -> d > maxDocId))
                 )
-                freshMemtable.fieldIdx
-      let prunedDocStore = Map.filterWithKey (\d _ -> d > maxDocId) freshMemtable.docStore
+                freshData.memtable.fieldIdx
+      let prunedDocStore = Map.filterWithKey (\d _ -> d > maxDocId) freshData.memtable.docStore
       TVar.writeTVar
         idxDataVar
-        idxData
-          { memtable = freshMemtable{fieldIdx = prunedFieldIdx, docStore = prunedDocStore}
-          , segments = [Segment sparseIndex fieldNames docsSparseIndex snapshotFileName]
+        freshData
+          { memtable = freshData.memtable{fieldIdx = prunedFieldIdx, docStore = prunedDocStore}
+          , segments = newSeg : freshData.segments
           }

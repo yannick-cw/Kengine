@@ -22,7 +22,6 @@ import Kengine.Tokenize (tokenize)
 import Kengine.Types (
   BlockLocation,
   DocId (DocId),
-  DocSparseIndex,
   DocStore,
   Document (..),
   FieldIndex,
@@ -37,7 +36,6 @@ import Kengine.Types (
   Query (..),
   SearchResults (..),
   Segment (..),
-  SparseIndex,
   Token,
  )
 import Refined (unrefine)
@@ -205,13 +203,13 @@ createInitialIdxData validMapping segments docsFromLog =
   let
     fieldMeta = foldl' (Map.unionWith Map.union) Map.empty ((\(_, m, _) -> m) <$> segments)
     -- todo just for now header.docCount as max id - wont hold for deletions
-    maxSnapshotId = (\(h, _, _) -> DocId $ fromIntegral h.docCount) <$> segments
+    maxDocIdFromSegments = sum $ (\(h, _, _) -> DocId $ fromIntegral h.docCount) <$> segments
     (updatedFieldIdx, updatedFieldMeta) =
       foldl'
         (\(fieldIdx, meta) nextDoc -> updateIndex fieldIdx meta nextDoc)
         (Map.empty, fieldMeta)
         docsFromAppendLog
-    maxDocId = foldl' max (DocId 0) (maxSnapshotId ++ ((.docId) <$> docsFromLog))
+    maxDocId = foldl' max maxDocIdFromSegments ((.docId) <$> docsFromLog)
    in
     IndexData
       { mapping = validMapping

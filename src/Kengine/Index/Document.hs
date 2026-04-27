@@ -27,7 +27,6 @@ parseDocument jVal Mapping{fields} =
    in
     first (ParseError . T.pack) (AE.Types.parseEither document jVal)
 
--- todo simplify
 docParser ::
   NEL.NonEmpty Field -> AE.Object -> AE.Types.Parser (Map.Map FieldName FieldValue)
 docParser fields obj =

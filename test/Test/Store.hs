@@ -17,6 +17,7 @@ import Kengine.Errors (IOE)
 import Kengine.Persistence.FileStore (mkFileStore')
 import Kengine.Store (Store (..), mkStore)
 import Kengine.Types (
+  DocId (..),
   Document,
   Field (..),
   FieldName,
@@ -57,7 +58,7 @@ doc2 =
 doc3 :: AE.Value
 doc3 =
   AE.object
-    [ "some_text" AE..= ("this is new" :: Text)
+    [ "some_text" AE..= ("this is new in" :: Text)
     , "other_field" AE..= ("ok" :: Text)
     ]
 
@@ -103,6 +104,25 @@ spec = do
           liftIO $ length firstDocBeforeFlush.results `shouldBe` 1
           liftIO $ length bothDocsAfterFlush.results `shouldBe` 2
           liftIO $ length bothDocsAfterSndFlush.results `shouldBe` 2
+
+    it "incrementes doc ids" $
+      withSystemTempDirectory "kengine-test" $ \dir -> do
+        let fileStore = mkFileStore' dir
+        runIOE $ do
+          store <- mkStore fileStore
+          _ <- store.createIndex indexName mapping
+          store.indexDoc indexName doc1
+          doc1Res <- store.search indexName (Query "in")
+          store.flushState
+          store.indexDoc indexName doc2
+          doc12Res <- store.search indexName (Query "in")
+          store.flushState
+          storeAfterFlush <- mkStore fileStore
+          storeAfterFlush.indexDoc indexName doc3
+          doc123Res <- storeAfterFlush.search indexName (Query "in")
+          liftIO $ (.doc.docId) <$> doc1Res.results `shouldBe` [DocId 1]
+          liftIO $ (.doc.docId) <$> doc12Res.results `shouldBe` [DocId 1, DocId 2]
+          liftIO $ (.doc.docId) <$> doc123Res.results `shouldBe` [DocId 3, DocId 1, DocId 2]
 
     it "recovers indexed docs across restarts" $
       withSystemTempDirectory "kengine-test" $ \dir -> do

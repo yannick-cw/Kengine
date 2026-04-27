@@ -15,7 +15,6 @@ import Data.ByteString.Char8 qualified as BSC
 import Data.List qualified as L
 import Data.List.NonEmpty qualified as Nel
 import Data.Map qualified as Map
-import Data.Maybe (fromMaybe)
 import Data.Ord (Down (Down))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -27,7 +26,7 @@ import Data.Text.Lazy.Builder.Int qualified as B
 import GHC.Conc qualified as TVar
 import Kengine.Errors (IOE, KengineError (SearchError))
 import Kengine.Persistence.Binary (Header (..))
-import Kengine.Persistence.FileStore (FileStore (..))
+import Kengine.Persistence.FileStore (FileStore (..), fileNameFromSegNum)
 import Kengine.Types (
   BlockLocation (..),
   DocFieldStats (..),
@@ -42,6 +41,7 @@ import Kengine.Types (
   Mapping (..),
   Memtable (..),
   Segment (..),
+  SegmentId (..),
   SparseIndex,
   Token (..),
  )
@@ -60,39 +60,42 @@ renderLayout fs viewVar name = do
   idxData <- liftIO (TVar.readTVarIO idxVar)
 
   let dir = fs.indexDir name
-      snapPath = dir </> "snapshot.bin"
       walPath = dir </> "log.jsonl"
 
-  -- todo fix all
-  snap <- readSnapshotInfo fs name snapPath
+  diskSegments <- fs.readSnapshots name
+  segInfos <- liftIO (traverse (toSegmentInfo dir) diskSegments)
   wal <- liftIO (readWalInfo walPath)
-  diskFieldIdx <- fs.readSnapshotFieldIndex name ""
-  let mergedFi =
-        Map.unionWith
-          (Map.unionWith Map.union)
-          idxData.memtable.fieldIdx
-          (fromMaybe Map.empty diskFieldIdx)
 
-  pure (B.toLazyText (renderPage name idxData mergedFi snapPath snap walPath wal))
+  pure (B.toLazyText (renderPage name idxData segInfos walPath wal))
 
--- on-disk reads -------------------------------------------------------------
+-- segment info --------------------------------------------------------------
 
-data SnapshotInfo
-  = NoSnapshot
-  | GoodSnapshot Integer Header SparseIndex DocSparseIndex
+data SegmentInfo = SegmentInfo
+  { segId :: SegmentId
+  , filePath :: FilePath
+  , fileSize :: Integer
+  , header :: Header
+  , sparseIndex :: SparseIndex
+  , docsSparseIndex :: DocSparseIndex
+  }
+
+toSegmentInfo :: FilePath -> (Header, FieldStats, Segment) -> IO SegmentInfo
+toSegmentInfo dir (h, _, Segment{sparseIndex, docsSparseIndex, segNum}) = do
+  let path = dir </> fileNameFromSegNum segNum
+  sz <- getFileSize path
+  pure
+    SegmentInfo
+      { segId = segNum
+      , filePath = path
+      , fileSize = sz
+      , header = h
+      , sparseIndex
+      , docsSparseIndex
+      }
+
+-- WAL -----------------------------------------------------------------------
 
 data WalInfo = NoWal | HasWal Integer Int [Text]
-
-readSnapshotInfo :: FileStore -> IndexName -> FilePath -> IOE KengineError SnapshotInfo
-readSnapshotInfo fs name path = do
-  undefined
-
--- parsed <- fs.readSnapshots name
--- case parsed of
---   Nothing -> pure NoSnapshot
---   Just (h, segment) -> do
---     sz <- liftIO (getFileSize path)
---     pure (GoodSnapshot sz h sparse docSparse)
 
 readWalInfo :: FilePath -> IO WalInfo
 readWalInfo path = do
@@ -113,48 +116,38 @@ readWalInfo path = do
 renderPage ::
   IndexName ->
   IndexData ->
-  FieldIndex ->
-  FilePath ->
-  SnapshotInfo ->
+  [SegmentInfo] ->
   FilePath ->
   WalInfo ->
   B.Builder
-renderPage name idxData mergedFi snapPath snap walPath wal =
+renderPage name idxData segs walPath wal =
   pageStart name
-    <> renderSummary idxData snap wal
+    <> renderSummary idxData segs wal
     <> renderMapping idxData.mapping
     <> renderFieldStats idxData.memtable.fieldMeta
     <> renderMemtable idxData.memtable
-    <> mconcat (fmap renderSegmentView idxData.segments)
-    <> renderInvertedIndex mergedFi
-    <> renderTopTokens mergedFi
-    <> renderSnapshot snapPath snap
-    <> renderTermSparseSample snap
-    <> renderDocSparseSample snap
+    <> renderMemtableIndex idxData.memtable.fieldIdx
+    <> renderTopTokens idxData.memtable.fieldIdx
+    <> renderSegments segs
     <> renderWal walPath wal
     <> pageEnd
 
 -- summary -------------------------------------------------------------------
 
-renderSummary :: IndexData -> SnapshotInfo -> WalInfo -> B.Builder
-renderSummary idxData snap wal =
+renderSummary :: IndexData -> [SegmentInfo] -> WalInfo -> B.Builder
+renderSummary idxData segs wal =
   raw "<section class=\"summary\">"
     <> card "memtable docs" (formatNum (Map.size idxData.memtable.docStore))
-    <> card "snapshot docs" snapDocCount
-    <> card "snapshot size" snapSize
+    <> card "segments" (formatNum (length segs))
+    <> card "snapshot docs" (formatNum totalSnapDocs)
+    <> card "snapshot size" (formatBytes totalSnapSize)
     <> card "wal entries" walEntries
     <> card "max doc id" (let DocId d = idxData.maxDocId in formatNum d)
-    <> card
-      "fields tracked"
-      (formatNum (Map.size idxData.memtable.fieldMeta))
+    <> card "fields tracked" (formatNum (Map.size idxData.memtable.fieldMeta))
     <> raw "</section>"
   where
-    snapDocCount = case snap of
-      NoSnapshot -> raw "—"
-      GoodSnapshot _ h _ _ -> formatNum (fromIntegral h.docCount :: Int)
-    snapSize = case snap of
-      NoSnapshot -> raw "—"
-      GoodSnapshot sz _ _ _ -> formatBytes sz
+    totalSnapDocs = sum [fromIntegral s.header.docCount :: Int | s <- segs]
+    totalSnapSize = sum ((.fileSize) <$> segs)
     walEntries = case wal of
       NoWal -> raw "—"
       HasWal _ n _ -> formatNum n
@@ -232,8 +225,6 @@ renderFieldStats fs
         <> formatBytes totalBytes
         <> raw "</td></tr>"
 
--- Rough memory estimate for one (DocId, DocFieldStats) entry in a Map.
--- Map node + key Int + value Int. Real footprint differs, this is a hint, not a measurement.
 approxFieldStatsBytes :: Int -> Integer
 approxFieldStatsBytes n = fromIntegral n * 56
 
@@ -255,30 +246,13 @@ renderMemtable Memtable{docStore, fieldIdx} =
     totalPostings =
       sum (sum . fmap Map.size . Map.elems <$> Map.elems fieldIdx)
 
--- segment in-memory view ----------------------------------------------------
-
-renderSegmentView :: Segment -> B.Builder
-renderSegmentView Segment{sparseIndex, docsSparseIndex, fieldNames} =
-  section
-    "segment view"
-    (Just "in-memory pointers to the on-disk snapshot")
-    <> raw "<table>"
-    <> kv "term sparse anchors" (formatNum (Map.size sparseIndex))
-    <> kv "doc sparse anchors" (formatNum (Map.size docsSparseIndex))
-    <> kv
-      "field names"
-      (if null fieldNames then raw "—" else escT (T.intercalate ", " (unrefine <$> fieldNames)))
-    <> raw "</table>"
-
--- inverted index merged -----------------------------------------------------
-
-renderInvertedIndex :: FieldIndex -> B.Builder
-renderInvertedIndex fi
+renderMemtableIndex :: FieldIndex -> B.Builder
+renderMemtableIndex fi
   | Map.null fi = mempty
   | otherwise =
       section
-        "inverted index"
-        (Just "memtable + on-disk merged")
+        "memtable inverted index"
+        (Just "per-field token + posting counts")
         <> raw "<table><tr><th>field</th>"
         <> raw "<th class=\"num\">tokens</th>"
         <> raw "<th class=\"num\">postings</th>"
@@ -319,7 +293,7 @@ renderTopTokens fi
   | null flat = mempty
   | otherwise =
       section
-        "top tokens by document frequency"
+        "memtable top tokens by document frequency"
         (Just (T.pack ("top " <> show (length top) <> " of " <> show (length flat))))
         <> raw "<table><tr><th>field</th><th>token</th><th class=\"num\">df</th></tr>"
         <> mconcat
@@ -337,31 +311,37 @@ renderTopTokens fi
     flat = [(fn, tk, Map.size pl) | (fn, tm) <- Map.toList fi, (tk, pl) <- Map.toList tm]
     top = take 15 (L.sortOn (\(_, _, df) -> Down df) flat)
 
--- snapshot file -------------------------------------------------------------
+-- segments ------------------------------------------------------------------
 
-renderSnapshot :: FilePath -> SnapshotInfo -> B.Builder
-renderSnapshot path NoSnapshot =
-  section "snapshot file" (Just "on-disk")
-    <> pathLine path
-    <> raw "<p class=\"muted\">no snapshot yet. POST /flush-state to write one.</p>"
-renderSnapshot path (GoodSnapshot sz h sparse _docSparse) =
-  section "snapshot file" (Just "on-disk")
-    <> pathLine path
+renderSegments :: [SegmentInfo] -> B.Builder
+renderSegments [] =
+  section "segments" Nothing
+    <> raw "<p class=\"muted\">no segments on disk yet. POST /flush-state to write one.</p>"
+renderSegments segs =
+  mconcat (renderSegment <$> L.sortOn (Down . (.segId)) segs)
+
+renderSegment :: SegmentInfo -> B.Builder
+renderSegment si@SegmentInfo{segId = SegmentId n, filePath, fileSize = sz, header = h, sparseIndex, docsSparseIndex} =
+  section
+    (T.pack ("segment " <> show n))
+    (Just (T.pack ("seg_" <> show n <> ".bin")))
+    <> pathLine filePath
     <> raw "<table>"
     <> kv "size" (formatBytes sz)
     <> kv "version" (formatNum (fromIntegral h.version :: Int))
     <> kv "mappingVersion" (formatNum (fromIntegral h.mappingVersion :: Int))
     <> kv "docCount" (formatNum (fromIntegral h.docCount :: Int))
     <> kv "fieldNames" (escT (T.intercalate ", " (unrefine <$> h.fieldNames)))
-    <> kv "term sparse anchors" (formatNum (Map.size sparse))
+    <> kv "term sparse anchors" (formatNum (Map.size sparseIndex))
+    <> kv "doc sparse anchors" (formatNum (Map.size docsSparseIndex))
     <> raw "</table>"
-    <> renderLayoutBar sections
-    <> renderSectionTable sections
-  where
-    sections = snapshotSections sz h
+    <> renderLayoutBar (segmentSections si)
+    <> renderSectionTable (segmentSections si)
+    <> termSparseTable sparseIndex
+    <> docSparseTable docsSparseIndex
 
-snapshotSections :: Integer -> Header -> [(Text, Text, Int, Int)]
-snapshotSections sz h =
+segmentSections :: SegmentInfo -> [(Text, Text, Int, Int)]
+segmentSections SegmentInfo{fileSize = sz, header = h} =
   [ ("header + token blocks", "#ed7d31", 0, fromIntegral h.termSparseOffset)
   ,
     ( "term sparse index"
@@ -425,26 +405,18 @@ renderSectionTable secs =
       ]
     <> raw "</table>"
 
-renderTermSparseSample :: SnapshotInfo -> B.Builder
-renderTermSparseSample (GoodSnapshot _ _ sparse _) = termSparseTable sparse
-renderTermSparseSample _ = mempty
-
-renderDocSparseSample :: SnapshotInfo -> B.Builder
-renderDocSparseSample (GoodSnapshot _ _ _ docSparse) = docSparseTable docSparse
-renderDocSparseSample _ = mempty
-
 termSparseTable :: SparseIndex -> B.Builder
 termSparseTable sparse
   | Map.null sparse = mempty
   | otherwise =
       let entries = take 10 (Map.toList sparse)
-       in section
-            "term sparse index"
-            ( Just
-                ( T.pack
-                    ("first " <> show (length entries) <> " of " <> show (Map.size sparse) <> " block anchors")
-                )
-            )
+       in raw "<h3 class=\"sub\">term sparse index "
+            <> raw "<span class=\"muted\">"
+            <> escT
+              ( T.pack
+                  ("first " <> show (length entries) <> " of " <> show (Map.size sparse) <> " block anchors")
+              )
+            <> raw "</span></h3>"
             <> raw
               "<table><tr><th>field</th><th>token (block start)</th><th class=\"num\">byte offset</th><th class=\"num\">block size</th></tr>"
             <> mconcat
@@ -466,18 +438,18 @@ docSparseTable docSparse
   | Map.null docSparse = mempty
   | otherwise =
       let entries = take 10 (Map.toList docSparse)
-       in section
-            "doc sparse index"
-            ( Just
-                ( T.pack
-                    ( "first "
-                        <> show (length entries)
-                        <> " of "
-                        <> show (Map.size docSparse)
-                        <> " block anchors"
-                    )
-                )
-            )
+       in raw "<h3 class=\"sub\">doc sparse index "
+            <> raw "<span class=\"muted\">"
+            <> escT
+              ( T.pack
+                  ( "first "
+                      <> show (length entries)
+                      <> " of "
+                      <> show (Map.size docSparse)
+                      <> " block anchors"
+                  )
+              )
+            <> raw "</span></h3>"
             <> raw
               "<table><tr><th>first docId in block</th><th class=\"num\">byte offset</th><th class=\"num\">block size</th></tr>"
             <> mconcat
@@ -531,10 +503,10 @@ pageEnd :: B.Builder
 pageEnd = raw "</body></html>"
 
 section :: Text -> Maybe Text -> B.Builder
-section title Nothing = raw "<h2>" <> raw title <> raw "</h2>"
+section title Nothing = raw "<h2>" <> escT title <> raw "</h2>"
 section title (Just sub) =
   raw "<h2>"
-    <> raw title
+    <> escT title
     <> raw " <span class=\"muted\">"
     <> escT sub
     <> raw "</span></h2>"
@@ -548,6 +520,7 @@ css =
     , "body{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;max-width:1100px;margin:1.5em auto;padding:0 1em;color:var(--fg)}"
     , "h1{font-size:18px;margin:0 0 .25em}"
     , "h2{font-size:13px;margin:1.6em 0 .5em;border-bottom:1px solid var(--rule);padding-bottom:3px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}"
+    , "h3.sub{font-size:11px;margin:1.1em 0 .35em;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:#555}"
     , "table{border-collapse:collapse;width:100%}"
     , "td,th{padding:3px 14px 3px 0;vertical-align:top;text-align:left}"
     , "th{font-weight:600;color:#555;font-size:11px;text-transform:uppercase;letter-spacing:.03em}"

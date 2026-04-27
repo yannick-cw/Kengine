@@ -1,8 +1,10 @@
 module Kengine.Types (
   BM25 (..),
+  newestSegment,
   DocSparseIndex,
   Memtable (..),
   Segment (..),
+  SegmentId (..),
   Mapping (..),
   FieldStats,
   SparseIndex,
@@ -36,8 +38,11 @@ import Data.Aeson (FromJSON (..), ToJSON (..), (.!=), (.:), (.:?))
 import Data.Aeson qualified as AE
 import Data.Bifunctor (first)
 import Data.Char (isAlphaNum)
+import Data.List (sortOn)
 import Data.List.NonEmpty qualified as L
 import Data.Map qualified as Map
+import Data.Maybe (listToMaybe)
+import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T (all, null)
 import Data.Text.Lazy qualified as LT
@@ -77,12 +82,19 @@ newtype DocFieldStats = DocFieldStats {totalTokens :: Int}
   deriving stock (Generic)
 
 data Memtable = Memtable {docStore :: DocStore, fieldIdx :: FieldIndex, fieldMeta :: FieldStats}
+newtype SegmentId = SegmentId Int
+  deriving newtype (Eq, Ord, Num, Show, Read)
+  deriving stock (Generic)
+
 data Segment = Segment
   { sparseIndex :: SparseIndex
   , fieldNames :: [FieldName]
   , docsSparseIndex :: DocSparseIndex
-  , fileName :: FilePath
+  , segNum :: SegmentId
   }
+newestSegment :: [Segment] -> Maybe Segment
+newestSegment segments = listToMaybe $ sortOn (Down . (.segNum)) segments
+
 data IndexData = IndexData
   { mapping :: Mapping
   , memtable :: Memtable

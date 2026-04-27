@@ -1,11 +1,12 @@
-module Kengine.Persistence.FileStore (FileStore (..), mkFileStore, mkFileStore') where
+module Kengine.Persistence.FileStore (FileStore (..), mkFileStore, mkFileStore', fileNameForNextSegment, fileNameFromSegNum) where
 
-import Control.Monad.Trans.Except (ExceptT (ExceptT), except, throwE)
+import Control.Monad.Trans.Except (except, throwE)
 import Data.Aeson qualified as AE
 import Data.Bifunctor (Bifunctor (first))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as L
-import Data.List (isPrefixOf)
+import Data.Char (isDigit)
+import Data.List (stripPrefix)
 import Data.Map qualified as Map
 import Data.Maybe qualified as M
 import Data.Text qualified as T
@@ -30,6 +31,7 @@ import Kengine.Types (
   IndexName,
   Mapping,
   Segment (..),
+  SegmentId (..),
   SparseIndex,
  )
 import Refined (refineFail, unrefine)
@@ -43,6 +45,7 @@ import System.Directory (
  )
 import System.FilePath ((</>))
 import System.IO (IOMode (ReadMode), SeekMode (AbsoluteSeek), hSeek, withFile)
+import Text.Read (readMaybe)
 
 dataDir :: IO FilePath
 dataDir = getXdgDirectory XdgData "kengine"
@@ -58,12 +61,10 @@ data FileStore = FileStore
   , indexDir :: IndexName -> FilePath
   , readDiskFieldIndex :: IndexName -> Segment -> BlockLocation -> IOE KengineError FieldIndex
   , readDiskDoc :: IndexName -> Segment -> BlockLocation -> IOE KengineError DocStore
-  , readSnapshotFieldIndex :: IndexName -> FilePath -> IOE KengineError (Maybe FieldIndex)
-  , readSnapshotDocs :: IndexName -> FilePath -> IOE KengineError (Maybe DocStore)
   , writePendingSnapshot ::
-      IndexName -> FilePath -> (DocStore, FieldIndex, FieldStats) -> IOE KengineError ()
-  , readPendingSnapshotSegment :: IndexName -> FilePath -> IOE KengineError Segment
-  , commitPendingSnapshot :: IndexName -> FilePath -> FilePath -> IOE KengineError ()
+      IndexName -> SegmentId -> (DocStore, FieldIndex, FieldStats) -> IOE KengineError ()
+  , readPendingSnapshotSegment :: IndexName -> SegmentId -> IOE KengineError Segment
+  , commitPendingSnapshot :: IndexName -> SegmentId -> IOE KengineError ()
   , truncateWAL :: IndexName -> DocId -> IOE KengineError ()
   }
 
@@ -82,13 +83,18 @@ mkFileStore' dir =
     , indexDir = pathToIdx dir
     , readDiskFieldIndex = readDiskFieldIndex' dir
     , readDiskDoc = readDiskDoc' dir
-    , readSnapshotFieldIndex = readSnapshotFieldIndex' dir
-    , readSnapshotDocs = readSnapshotDocs' dir
     , writePendingSnapshot = writePendingSnapshot' dir
     , readPendingSnapshotSegment = readPendingSnapshotSegment' dir
     , commitPendingSnapshot = commitPendingSnapshot' dir
     , truncateWAL = truncateWAL' dir
     }
+
+fileNameForNextSegment :: Maybe Segment -> FilePath
+fileNameForNextSegment Nothing = "seg_1.bin"
+fileNameForNextSegment (Just Segment{segNum}) = fileNameFromSegNum (segNum + 1)
+
+fileNameFromSegNum :: SegmentId -> FilePath
+fileNameFromSegNum (SegmentId n) = "seg_" ++ show n ++ ".bin"
 
 mappingFile, walFile, segmentFilePrefix :: FilePath
 mappingFile = "mapping.json"
@@ -116,26 +122,28 @@ readSnapshots' ::
   IndexName ->
   IOE KengineError [(Header, FieldStats, Segment)]
 readSnapshots' dir idxName = do
-  dirContent <- listDirs (pathToIdx dir idxName)
-  let segmentFiles = filter (isPrefixOf segmentFilePrefix) dirContent
-  rawSegments <-
-    M.catMaybes
-      <$> traverse
-        ( \fname -> fmap (,fname) <$> readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> fname)
-        )
-        segmentFiles
-  let segments =
-        ( \((header, sparse, doc, fieldStats), fname) -> (header, fieldStats, Segment sparse header.fieldNames doc fname)
-        )
-          <$> rawSegments
-  pure segments
+  let idxPath = pathToIdx dir idxName
+  dirContent <- listDirs idxPath
+  let segs = M.mapMaybe (\f -> (f,) <$> fileNameToNum f) dirContent
+  M.catMaybes <$> traverse readOne segs
+  where
+    readOne (fname, num) =
+      fmap (toTriple num) <$> readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> fname)
+    toTriple num (header, sparse, doc, fieldStats) =
+      (header, fieldStats, Segment sparse header.fieldNames doc num)
+    fileNameToNum fileName = do
+      rest <- stripPrefix segmentFilePrefix fileName
+      readMaybe (takeWhile isDigit rest)
 
 readDiskFieldIndex' ::
   FilePath -> IndexName -> Segment -> BlockLocation -> IOE KengineError FieldIndex
-readDiskFieldIndex' dir idxName (Segment{fieldNames, fileName}) location = do
+readDiskFieldIndex' dir idxName (Segment{fieldNames, segNum}) location = do
   let fieldNameLookup = Map.fromList $ zip [0 :: Word16 ..] fieldNames
   blockOfTokens <-
-    readAtBlockLocation blockDecode (pathToIdx dir idxName </> fileName) location
+    readAtBlockLocation
+      blockDecode
+      (pathToIdx dir idxName </> fileNameFromSegNum segNum)
+      location
   let indexPerEntry :: [FieldIndex] =
         ( \entry ->
             Map.singleton
@@ -147,46 +155,43 @@ readDiskFieldIndex' dir idxName (Segment{fieldNames, fileName}) location = do
 
 readDiskDoc' ::
   FilePath -> IndexName -> Segment -> BlockLocation -> IOE KengineError DocStore
-readDiskDoc' dir idxName Segment{fileName} location = do
+readDiskDoc' dir idxName Segment{segNum} location = do
   documentBlock <-
-    readAtBlockLocation docDecode (pathToIdx dir idxName </> fileName) location
+    readAtBlockLocation
+      docDecode
+      (pathToIdx dir idxName </> fileNameFromSegNum segNum)
+      location
   pure $ Map.fromList ((\doc -> (doc.docId, doc)) <$> documentBlock)
-
--- pure (foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty indexPerEntry)
-
-readSnapshotFieldIndex' ::
-  FilePath -> IndexName -> FilePath -> IOE KengineError (Maybe FieldIndex)
-readSnapshotFieldIndex' dir idxName fileName =
-  readForIdxFile fieldIndexDecode (pathToIdx dir idxName </> fileName)
-
-readSnapshotDocs' ::
-  FilePath -> IndexName -> FilePath -> IOE KengineError (Maybe DocStore)
-readSnapshotDocs' dir idxName fileName = readForIdxFile docsDecode (pathToIdx dir idxName </> fileName)
 
 writePendingSnapshot' ::
   FilePath ->
   IndexName ->
-  FilePath ->
+  SegmentId ->
   (DocStore, FieldIndex, FieldStats) ->
   IOE KengineError ()
-writePendingSnapshot' = writeFullFile snapshotEnCodec
+writePendingSnapshot' dir idxName segId =
+  writeFullFile snapshotEnCodec dir idxName (pendingFileName segId)
 
 readPendingSnapshotSegment' ::
-  FilePath -> IndexName -> FilePath -> IOE KengineError Segment
-readPendingSnapshotSegment' dir idxName pendingSnapshotFile = do
-  segment <- readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> pendingSnapshotFile)
+  FilePath -> IndexName -> SegmentId -> IOE KengineError Segment
+readPendingSnapshotSegment' dir idxName segId = do
+  segment <-
+    readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> pendingFileName segId)
   maybe
     (throwE (FileError "flushed segment not found"))
-    (\(h, b, dss, _) -> pure $ Segment b h.fieldNames dss pendingSnapshotFile)
+    (\(h, b, dss, _) -> pure $ Segment b h.fieldNames dss segId)
     segment
 
 commitPendingSnapshot' ::
-  FilePath -> IndexName -> FilePath -> FilePath -> IOE KengineError ()
-commitPendingSnapshot' dir idxName pendingSnapshotFile snapshotFile =
+  FilePath -> IndexName -> SegmentId -> IOE KengineError ()
+commitPendingSnapshot' dir idxName segId =
   liftIOE FileError "commitPendingSnapshot/renameFile" $
     renameFile
-      (pathToIdx dir idxName </> pendingSnapshotFile)
-      (pathToIdx dir idxName </> snapshotFile)
+      (pathToIdx dir idxName </> pendingFileName segId)
+      (pathToIdx dir idxName </> fileNameFromSegNum segId)
+
+pendingFileName :: SegmentId -> FilePath
+pendingFileName segId = fileNameFromSegNum segId ++ ".new"
 
 truncateWAL' :: FilePath -> IndexName -> DocId -> IOE KengineError ()
 truncateWAL' dir idxName upTo = do
@@ -271,7 +276,7 @@ jsonLDeCodec =
 snapshotEnCodec :: EnCodec (DocStore, FieldIndex, FieldStats)
 snapshotEnCodec = EnCodec{encode = \(a, b, c) -> encodeState a b c}
 
--- todo smarter reading, skip eading docstore
+-- todo smarter reading, skip reading docstore
 snapshotDeCodec :: DeCodec (Header, SparseIndex, DocSparseIndex, FieldStats)
 snapshotDeCodec =
   DeCodec
@@ -279,18 +284,6 @@ snapshotDeCodec =
         first (FileError . T.pack)
           . fmap (\(h, _ds, _fi, si, dsi, fs) -> (h, si, dsi, fs))
           . decodeSnapshot
-    }
-
-fieldIndexDecode :: DeCodec FieldIndex
-fieldIndexDecode =
-  DeCodec
-    { decode = first (FileError . T.pack) . fmap (\(_, _, f, _, _, _) -> f) . decodeSnapshot
-    }
-
-docsDecode :: DeCodec DocStore
-docsDecode =
-  DeCodec
-    { decode = first (FileError . T.pack) . fmap (\(_, ds, _, _, _, _) -> ds) . decodeSnapshot
     }
 
 blockDecode :: DeCodec [TokenEntry]
