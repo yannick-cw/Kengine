@@ -25,6 +25,7 @@ import Kengine.Types (
   DocSparseIndex,
   DocStore,
   Document (..),
+  FieldIndex,
   FieldStats,
   IndexData (..),
   IndexName,
@@ -63,7 +64,7 @@ mkStore fs = do
       }
 
 loadIndexes :: FileStore -> IOE KengineError (TVar.TVar IndexView)
-loadIndexes FileStore{readIdxs, readMapping, readSnapshot, readDocs} = do
+loadIndexes FileStore{readIdxs, readMapping, readSnapshots, readDocs} = do
   allIndexes <- readIdxs
   liftIO $
     print
@@ -72,7 +73,7 @@ loadIndexes FileStore{readIdxs, readMapping, readSnapshot, readDocs} = do
     traverse
       ( \idx -> do
           mapping <- requireMapping readMapping idx
-          snapshotData <- readSnapshot idx
+          snapshotData <- readSnapshots idx
           allDocs <- readDocs idx
           (idx,) <$> liftIO (TVar.newTVarIO $ createInitialIdxData mapping snapshotData allDocs)
       )
@@ -133,25 +134,31 @@ search' ::
   FileStore ->
   IndexName ->
   Query ->
-  IOE KengineError SearchResults
+  Result SearchResults
 search' indexViewVar FileStore{readDiskFieldIndex, readDiskDoc} name (Query query) = do
   idxView <- liftIO $ TVar.readTVarIO indexViewVar
   idxDataVar <- lookupIndex name idxView
-  IndexData{memtable = Memtable{docStore, fieldIdx, fieldMeta}, segment} <-
+  IndexData{memtable = Memtable{docStore, fieldIdx, fieldMeta}, segments} <-
     liftIO $ TVar.readTVarIO idxDataVar
   let qTokens = tokenize query
-  let offsets = resolveSparseIdx qTokens segment
-  fromFileInvertedIdx <- traverse (readDiskFieldIndex name segment) offsets
-  let completeFromFileIdx = foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty fromFileInvertedIdx
-  let completeFieldIndex = Map.unionWith (Map.unionWith Map.union) fieldIdx completeFromFileIdx
-  -- todo better in the future to get for all docId candidates once
+  inveretdIdxsFromAllSegments <-
+    traverse (resolveInvertedIdxsForOneSegment qTokens) segments
+  -- merge from left to right, starting with in mem and then newest segment - leftmost - first
+  let completeFieldIndex = mergeIdxs $ mergeIdxs <$> [fieldIdx] : inveretdIdxsFromAllSegments
+  let lookupDocsInAllSegments docIds = mconcat <$> traverse (diskDocLookup docIds) segments
   SearchResults . take 100
-    <$> searchQ qTokens docStore completeFieldIndex fieldMeta (diskDocLookup segment)
+    <$> searchQ qTokens docStore completeFieldIndex fieldMeta lookupDocsInAllSegments
   where
-    diskDocLookup :: Segment -> [DocId] -> Result DocStore
-    diskDocLookup segment docIds = do
+    diskDocLookup :: [DocId] -> Segment -> Result DocStore
+    diskDocLookup docIds segment = do
       let blockLocations = L.nub $ M.mapMaybe (`resolveDocSparseIdx` segment) docIds
-      mconcat <$> traverse (readDiskDoc name) blockLocations
+      mconcat <$> traverse (readDiskDoc name segment) blockLocations
+    resolveInvertedIdxsForOneSegment :: [Token] -> Segment -> Result [FieldIndex]
+    resolveInvertedIdxsForOneSegment tokens segment = do
+      let offsets = resolveSparseIdx tokens segment
+      traverse (readDiskFieldIndex name segment) offsets
+    mergeIdxs :: [FieldIndex] -> FieldIndex
+    mergeIdxs = foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty
 
 flushState' :: TVar.TVar IndexView -> FileStore -> IOE KengineError ()
 flushState' indexViewVar fs = do
@@ -185,29 +192,26 @@ createEmptyIdxData validMapping =
   IndexData
     { mapping = validMapping
     , memtable = Memtable{docStore = Map.empty, fieldIdx = Map.empty, fieldMeta = Map.empty}
-    , segment = Segment Map.empty [] Map.empty
+    , segments = []
     , maxDocId = DocId 0
     }
 
 createInitialIdxData ::
   Mapping ->
-  Maybe (Header, SparseIndex, DocSparseIndex, FieldStats) ->
+  [(Header, FieldStats, Segment)] ->
   [Document] ->
   IndexData
-createInitialIdxData validMapping snapshot docsFromLog =
+createInitialIdxData validMapping segments docsFromLog =
   let
+    fieldMeta = foldl' (Map.unionWith Map.union) Map.empty ((\(_, m, _) -> m) <$> segments)
     -- todo just for now header.docCount as max id - wont hold for deletions
-    (sparseIndex, fieldMeta, fieldNames, docSparse, maxSnapshotId) = case snapshot of
-      Nothing -> (Map.empty, Map.empty, [], Map.empty, 0)
-      Just (h, si, dsi, fs) -> (si, fs, h.fieldNames, dsi, fromIntegral h.docCount)
-    -- this should in practice just be `docsFromAppendLog` - but in case of crash
-    -- append log docs would have not been cleaned up
+    maxSnapshotId = (\(h, _, _) -> DocId $ fromIntegral h.docCount) <$> segments
     (updatedFieldIdx, updatedFieldMeta) =
       foldl'
         (\(fieldIdx, meta) nextDoc -> updateIndex fieldIdx meta nextDoc)
         (Map.empty, fieldMeta)
         docsFromAppendLog
-    maxDocId = foldl' max (DocId maxSnapshotId) ((.docId) <$> docsFromLog)
+    maxDocId = foldl' max (DocId 0) (maxSnapshotId ++ ((.docId) <$> docsFromLog))
    in
     IndexData
       { mapping = validMapping
@@ -217,7 +221,8 @@ createInitialIdxData validMapping snapshot docsFromLog =
             , fieldIdx = updatedFieldIdx
             , fieldMeta = updatedFieldMeta
             }
-      , segment = Segment sparseIndex fieldNames docSparse
+      , -- todo needs file path as param to segement
+        segments = (\(_, _, s) -> s) <$> segments
       , maxDocId
       }
   where

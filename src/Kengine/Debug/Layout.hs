@@ -63,9 +63,10 @@ renderLayout fs viewVar name = do
       snapPath = dir </> "snapshot.bin"
       walPath = dir </> "log.jsonl"
 
+  -- todo fix all
   snap <- readSnapshotInfo fs name snapPath
   wal <- liftIO (readWalInfo walPath)
-  diskFieldIdx <- fs.readSnapshotFieldIndex name
+  diskFieldIdx <- fs.readSnapshotFieldIndex name ""
   let mergedFi =
         Map.unionWith
           (Map.unionWith Map.union)
@@ -84,12 +85,14 @@ data WalInfo = NoWal | HasWal Integer Int [Text]
 
 readSnapshotInfo :: FileStore -> IndexName -> FilePath -> IOE KengineError SnapshotInfo
 readSnapshotInfo fs name path = do
-  parsed <- fs.readSnapshot name
-  case parsed of
-    Nothing -> pure NoSnapshot
-    Just (h, sparse, docSparse, _meta) -> do
-      sz <- liftIO (getFileSize path)
-      pure (GoodSnapshot sz h sparse docSparse)
+  undefined
+
+-- parsed <- fs.readSnapshots name
+-- case parsed of
+--   Nothing -> pure NoSnapshot
+--   Just (h, segment) -> do
+--     sz <- liftIO (getFileSize path)
+--     pure (GoodSnapshot sz h sparse docSparse)
 
 readWalInfo :: FilePath -> IO WalInfo
 readWalInfo path = do
@@ -122,7 +125,7 @@ renderPage name idxData mergedFi snapPath snap walPath wal =
     <> renderMapping idxData.mapping
     <> renderFieldStats idxData.memtable.fieldMeta
     <> renderMemtable idxData.memtable
-    <> renderSegmentView idxData.segment
+    <> mconcat (fmap renderSegmentView idxData.segments)
     <> renderInvertedIndex mergedFi
     <> renderTopTokens mergedFi
     <> renderSnapshot snapPath snap
@@ -467,7 +470,12 @@ docSparseTable docSparse
             "doc sparse index"
             ( Just
                 ( T.pack
-                    ("first " <> show (length entries) <> " of " <> show (Map.size docSparse) <> " block anchors")
+                    ( "first "
+                        <> show (length entries)
+                        <> " of "
+                        <> show (Map.size docSparse)
+                        <> " block anchors"
+                    )
                 )
             )
             <> raw

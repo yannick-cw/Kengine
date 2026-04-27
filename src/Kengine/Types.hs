@@ -81,11 +81,12 @@ data Segment = Segment
   { sparseIndex :: SparseIndex
   , fieldNames :: [FieldName]
   , docsSparseIndex :: DocSparseIndex
+  , fileName :: FilePath
   }
 data IndexData = IndexData
   { mapping :: Mapping
   , memtable :: Memtable
-  , segment :: Segment
+  , segments :: [Segment]
   , maxDocId :: DocId
   }
 

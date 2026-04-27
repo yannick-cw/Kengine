@@ -2,6 +2,7 @@ module Kengine.Persistence.Flush (flushSegment) where
 
 import Control.Monad.IO.Class (liftIO)
 import Data.Map qualified as Map
+import Data.Maybe (listToMaybe)
 import Data.Maybe qualified as M
 import GHC.Conc qualified as TVar
 import Kengine.Errors (IOE, KengineError)
@@ -27,10 +28,12 @@ flushSegment
     }
   idxName
   idxDataVar = do
-    IndexData{memtable = Memtable{docStore, fieldIdx, fieldMeta}, maxDocId} <-
+    IndexData{memtable = Memtable{docStore, fieldIdx, fieldMeta}, maxDocId, segments} <-
       liftIO $ TVar.readTVarIO idxDataVar
-    diskFieldIdx <- readSnapshotFieldIndex idxName
-    diskDocs <- readSnapshotDocs idxName
+    -- todo just for in between
+    let snapshotFileName = "seg_00001.bin"
+    diskFieldIdx <- readSnapshotFieldIndex idxName snapshotFileName
+    diskDocs <- readSnapshotDocs idxName snapshotFileName
     let completeDocStore = maybe docStore (Map.union docStore) diskDocs
     let mergedFieldIdx =
           Map.unionWith
@@ -38,11 +41,15 @@ flushSegment
             fieldIdx
             (M.fromMaybe Map.empty diskFieldIdx)
     -- unsafe version, overwrites old snapshot
-    writePendingSnapshot idxName (completeDocStore, mergedFieldIdx, fieldMeta)
+    writePendingSnapshot
+      idxName
+      (snapshotFileName ++ ".new")
+      (completeDocStore, mergedFieldIdx, fieldMeta)
     -- read new sparse index + fieldnames
-    Segment{sparseIndex, docsSparseIndex, fieldNames} <- readPendingSnapshotSegment idxName
+    Segment{sparseIndex, docsSparseIndex, fieldNames} <-
+      readPendingSnapshotSegment idxName (snapshotFileName ++ ".new")
     -- rename file,
-    commitPendingSnapshot idxName
+    commitPendingSnapshot idxName (snapshotFileName ++ ".new") snapshotFileName
     -- atomically:  replace sparse idx + fieldnames, cleanup in mem fieldIdx with exisiting entries (only keep newer maxdocid)
     -- unsafe version, deletion of log entries
     truncateWAL idxName maxDocId
@@ -61,5 +68,5 @@ flushSegment
         idxDataVar
         idxData
           { memtable = freshMemtable{fieldIdx = prunedFieldIdx, docStore = prunedDocStore}
-          , segment = Segment sparseIndex fieldNames docsSparseIndex
+          , segments = [Segment sparseIndex fieldNames docsSparseIndex snapshotFileName]
           }
