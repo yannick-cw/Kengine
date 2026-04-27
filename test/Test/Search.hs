@@ -40,11 +40,16 @@ spec = do
 
       let
         fieldName :: FieldName = $$(R.refineTH "search_field")
-        docStore =
+        docStoreFstHalf =
           Map.fromList $
             ( \idx -> (DocId idx, Document{docId = DocId idx, body = Map.singleton fieldName (TextVal "")})
             )
-              <$> [1 .. 20]
+              <$> [1 .. 10]
+        docStoreSndHalf =
+          Map.fromList $
+            ( \idx -> (DocId idx, Document{docId = DocId idx, body = Map.singleton fieldName (TextVal "")})
+            )
+              <$> [11 .. 20]
         fieldIndex =
           Map.singleton
             fieldName
@@ -53,7 +58,8 @@ spec = do
           Map.singleton
             fieldName
             (Map.fromList [(DocId 1, DocFieldStats 5), (DocId 2, DocFieldStats 10)])
-        searchResIO = searchQ [Token "test"] docStore fieldIndex fieldMeta (\_ -> pure Nothing)
+        searchResIO =
+          searchQ [Token "test"] docStoreFstHalf fieldIndex fieldMeta (\_ -> pure docStoreSndHalf)
         idf = log ((2 - 2 + 0.5) / (2 + 0.5) + 1)
         doc1 = idf * (10 * (1.2 + 1)) / (10 + 1.2 * (1 - 0.75 + 0.75 * (5 / 7.5)))
         doc2 = idf * (5 * (1.2 + 1)) / (5 + 1.2 * (1 - 0.75 + 0.75 * (10 / 7.5)))
@@ -64,9 +70,16 @@ spec = do
 
     it "matches ALL query terms" $
       let
-        docStore =
+        docStoreFstHalf =
           Map.fromList $
-            (\idx -> (DocId idx, Document{docId = DocId idx, body = Map.empty})) <$> [1 .. 20]
+            ( \idx -> (DocId idx, Document{docId = DocId idx, body = Map.singleton fieldName (TextVal "")})
+            )
+              <$> [1 .. 10]
+        docStoreSndHalf =
+          Map.fromList $
+            ( \idx -> (DocId idx, Document{docId = DocId idx, body = Map.singleton fieldName (TextVal "")})
+            )
+              <$> [11 .. 20]
         fieldName :: FieldName = $$(R.refineTH "search_field")
         fieldIndex =
           Map.singleton
@@ -80,7 +93,13 @@ spec = do
           Map.singleton
             fieldName
             (Map.fromList [(DocId 1, DocFieldStats 5), (DocId 2, DocFieldStats 10)])
-        searchResIO = searchQ [Token "and", Token "test"] docStore fieldIndex fieldMeta (\_ -> pure Nothing)
+        searchResIO =
+          searchQ
+            [Token "and", Token "test"]
+            docStoreFstHalf
+            fieldIndex
+            fieldMeta
+            (\_ -> pure docStoreSndHalf)
        in
         do
           searchRes <- runIOE searchResIO

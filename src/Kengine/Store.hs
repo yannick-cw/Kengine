@@ -3,6 +3,7 @@ module Kengine.Store (Store (..), mkStore) where
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (ExceptT (..), throwE)
 import Data.Aeson qualified as AE
+import Data.List qualified as L
 import Data.Map qualified as Map
 import Data.Maybe qualified as M
 import Data.Text qualified as T
@@ -22,6 +23,7 @@ import Kengine.Types (
   BlockLocation,
   DocId (DocId),
   DocSparseIndex,
+  DocStore,
   Document (..),
   FieldStats,
   IndexData (..),
@@ -143,15 +145,13 @@ search' indexViewVar FileStore{readDiskFieldIndex, readDiskDoc} name (Query quer
   let completeFromFileIdx = foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty fromFileInvertedIdx
   let completeFieldIndex = Map.unionWith (Map.unionWith Map.union) fieldIdx completeFromFileIdx
   -- todo better in the future to get for all docId candidates once
-  SearchResults
+  SearchResults . take 100
     <$> searchQ qTokens docStore completeFieldIndex fieldMeta (diskDocLookup segment)
   where
-    diskDocLookup :: Segment -> DocId -> Result (Maybe Document)
-    diskDocLookup segment docId =
-      maybe
-        (pure Nothing)
-        (fmap (Map.lookup docId) . readDiskDoc name)
-        (resolveDocSparseIdx docId segment)
+    diskDocLookup :: Segment -> [DocId] -> Result DocStore
+    diskDocLookup segment docIds = do
+      let blockLocations = L.nub $ M.mapMaybe (`resolveDocSparseIdx` segment) docIds
+      mconcat <$> traverse (readDiskDoc name) blockLocations
 
 flushState' :: TVar.TVar IndexView -> FileStore -> IOE KengineError ()
 flushState' indexViewVar fs = do

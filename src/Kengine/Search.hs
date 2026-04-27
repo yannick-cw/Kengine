@@ -28,7 +28,7 @@ searchQ ::
   DocStore ->
   FieldIndex ->
   FieldStats ->
-  (DocId -> Result (Maybe Document)) ->
+  ([DocId] -> Result DocStore) ->
   Result [SearchResult]
 searchQ tokenizedQ docStore fieldIndex fieldMeta docDiskLookup =
   let
@@ -36,18 +36,17 @@ searchQ tokenizedQ docStore fieldIndex fieldMeta docDiskLookup =
     perFieldResults :: [Map.Map DocId Score]
     perFieldResults = Map.elems $ Map.mapWithKey searchOneField fieldIndex
     perDocScore = Map.fromListWith (+) (Map.toList =<< perFieldResults)
+    docsNeedDiskLookup = Map.keys $ Map.difference perDocScore docStore
    in
-    L.sortOn Down
-      . Map.elems
-      <$> Map.traverseMaybeWithKey
-        ( \docId score ->
-            fmap (\doc -> SearchResult{doc, score})
-              <$> case Map.lookup docId docStore of
-                Just doc -> pure $ Just doc
-                -- we need disk lookup
-                Nothing -> docDiskLookup docId
-        )
-        perDocScore
+    do
+      docsFromDisk <- docDiskLookup docsNeedDiskLookup
+      let allDocs = Map.union docsFromDisk docStore
+      let searchResults =
+            Map.elems $
+              Map.mapMaybeWithKey
+                (\docId score -> (\doc -> SearchResult{doc, score}) <$> Map.lookup docId allDocs)
+                perDocScore
+      pure $ L.sortOn Down searchResults
   where
     -- Map.elems $
     --   Map.intersectionWith (\score doc -> SearchResult{doc, score}) perDocScore docStore
