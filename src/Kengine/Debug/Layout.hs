@@ -321,7 +321,14 @@ renderSegments segs =
   mconcat (renderSegment <$> L.sortOn (Down . (.segId)) segs)
 
 renderSegment :: SegmentInfo -> B.Builder
-renderSegment si@SegmentInfo{segId = SegmentId n, filePath, fileSize = sz, header = h, sparseIndex, docsSparseIndex} =
+renderSegment si@SegmentInfo
+                { segId = SegmentId n
+                , filePath
+                , fileSize = sz
+                , header = h
+                , sparseIndex
+                , docsSparseIndex
+                } =
   section
     (T.pack ("segment " <> show n))
     (Just (T.pack ("seg_" <> show n <> ".bin")))

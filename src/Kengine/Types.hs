@@ -28,6 +28,9 @@ module Kengine.Types (
   FieldName,
   InvertedIndex,
   DocStore,
+  mergeDocStore,
+  mergeFieldIndex,
+  mergeFieldStats,
   IndexData (..),
   IndexView,
   Token (..),
@@ -75,6 +78,18 @@ type FieldIndex = Map.Map FieldName InvertedIndex
 type SparseIndex = Map.Map (FieldName, Token) BlockLocation
 type DocSparseIndex = Map.Map DocId BlockLocation
 type DocStore = Map.Map DocId Document
+
+-- left-biased
+mergeDocStore :: DocStore -> DocStore -> DocStore
+mergeDocStore = Map.union
+
+-- left-biased at the innermost (DocId)
+mergeFieldIndex :: FieldIndex -> FieldIndex -> FieldIndex
+mergeFieldIndex = Map.unionWith (Map.unionWith Map.union)
+
+-- left-biased at the innermost (DocId) level
+mergeFieldStats :: FieldStats -> FieldStats -> FieldStats
+mergeFieldStats = Map.unionWith Map.union
 type IndexView = (Map.Map IndexName (TVar.TVar IndexData))
 type FieldStats = Map.Map FieldName (Map.Map DocId DocFieldStats)
 newtype DocFieldStats = DocFieldStats {totalTokens :: Int}

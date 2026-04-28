@@ -139,6 +139,25 @@ spec = do
           bothDocs <- store3.search indexName (Query "these terms are in both")
           liftIO $ length bothDocs.results `shouldBe` 2
 
+    it "search survives compaction after 5 flushes" $
+      withSystemTempDirectory "kengine-test" $ \dir -> do
+        let fileStore = mkFileStore' dir
+        runIOE $ do
+          store1 <- mkStore fileStore
+          _ <- store1.createIndex indexName mapping
+          store1.indexDoc indexName doc1
+          store1.flushState
+          store1.flushState
+          store1.flushState
+          store1.flushState
+          store1.flushState
+          store1.flushState
+          docAfterMerge <- store1.search indexName (Query "apple")
+          store2 <- mkStore fileStore
+          docAfterRestart <- store2.search indexName (Query "apple")
+          liftIO $ length docAfterMerge.results `shouldBe` 1
+          liftIO $ length docAfterRestart.results `shouldBe` 1
+
     it "only find the doc if it includes the full query (AND query tokens)" $ do
       hedgehog $ do
         idxName <- forAll genValidIndexName

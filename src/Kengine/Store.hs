@@ -37,6 +37,8 @@ import Kengine.Types (
   SearchResults (..),
   Segment (..),
   Token,
+  mergeFieldIndex,
+  mergeFieldStats,
  )
 import Refined (unrefine)
 import Validation qualified as V (validationToEither)
@@ -156,7 +158,7 @@ search' indexViewVar FileStore{readDiskFieldIndex, readDiskDoc} name (Query quer
       let offsets = resolveSparseIdx tokens segment
       traverse (readDiskFieldIndex name segment) offsets
     mergeIdxs :: [FieldIndex] -> FieldIndex
-    mergeIdxs = foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty
+    mergeIdxs = foldl' mergeFieldIndex Map.empty
 
 flushState' :: TVar.TVar IndexView -> FileStore -> IOE KengineError ()
 flushState' indexViewVar fs = do
@@ -201,7 +203,7 @@ createInitialIdxData ::
   IndexData
 createInitialIdxData validMapping segments docsFromLog =
   let
-    fieldMeta = foldl' (Map.unionWith Map.union) Map.empty ((\(_, m, _) -> m) <$> segments)
+    fieldMeta = foldl' mergeFieldStats Map.empty ((\(_, m, _) -> m) <$> segments)
     -- todo just for now header.docCount as max id - wont hold for deletions
     maxDocIdFromSegments = sum $ (\(h, _, _) -> DocId $ fromIntegral h.docCount) <$> segments
     (updatedFieldIdx, updatedFieldMeta) =

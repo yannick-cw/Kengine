@@ -48,6 +48,8 @@ import Kengine.Types (
   SparseIndex,
   TermFrequency (..),
   Token (..),
+  mergeFieldIndex,
+  mergeFieldStats,
  )
 import Refined (refineFail, unrefine)
 
@@ -266,7 +268,7 @@ buildDocStore docs = Map.fromList $ (\d -> (d.docId, d)) <$> docs
 buildFieldIndex :: Header -> [TokenEntry] -> FieldIndex
 buildFieldIndex header tokenEntries =
   foldl'
-    (Map.unionWith (Map.unionWith Map.union))
+    mergeFieldIndex
     Map.empty
     ( ( \e ->
           Map.singleton
@@ -279,7 +281,7 @@ buildFieldIndex header tokenEntries =
 buildFieldStats :: Header -> [FieldMeta] -> FieldStats
 buildFieldStats header meta =
   foldl'
-    (Map.unionWith Map.union)
+    mergeFieldStats
     Map.empty
     ( ( \e ->
           Map.singleton

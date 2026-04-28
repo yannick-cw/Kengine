@@ -18,6 +18,7 @@ import Kengine.Types (
   SearchResult (..),
   TermFrequency (TF),
   Token,
+  mergeDocStore,
  )
 
 -- todo we should not pass docstore and metadata at all - it should come from a unified search interface that internally
@@ -39,7 +40,7 @@ searchQ tokenizedQ docStore fieldIndex fieldMeta docDiskLookup =
    in
     do
       docsFromDisk <- docDiskLookup docsNeedDiskLookup
-      let allDocs = Map.union docsFromDisk docStore
+      let allDocs = mergeDocStore docsFromDisk docStore
       let searchResults =
             Map.elems $
               Map.mapMaybeWithKey

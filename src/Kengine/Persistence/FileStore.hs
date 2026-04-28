@@ -6,6 +6,7 @@ import Data.Bifunctor (Bifunctor (first))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as L
 import Data.Char (isDigit)
+import Data.Foldable (traverse_)
 import Data.List (stripPrefix)
 import Data.Map qualified as Map
 import Data.Maybe qualified as M
@@ -33,6 +34,7 @@ import Kengine.Types (
   Segment (..),
   SegmentId (..),
   SparseIndex,
+  mergeFieldIndex,
  )
 import Refined (refineFail, unrefine)
 import System.Directory (
@@ -41,6 +43,7 @@ import System.Directory (
   doesFileExist,
   getXdgDirectory,
   listDirectory,
+  removeFile,
   renameFile,
  )
 import System.FilePath ((</>))
@@ -57,7 +60,9 @@ data FileStore = FileStore
   , storeDoc :: IndexName -> Document -> IOE KengineError ()
   , readDocs :: IndexName -> IOE KengineError [Document]
   , readSnapshots ::
-      IndexName -> IOE KengineError [(Header, FieldStats, Segment)]
+      IndexName -> IOE KengineError [(Header, FieldStats, Segment)] -- todo can be optimized to actually not read full snapshot
+  , readFullSnapshots ::
+      IndexName -> IOE KengineError [(DocStore, FieldStats, FieldIndex)]
   , indexDir :: IndexName -> FilePath
   , readDiskFieldIndex :: IndexName -> Segment -> BlockLocation -> IOE KengineError FieldIndex
   , readDiskDoc :: IndexName -> Segment -> BlockLocation -> IOE KengineError DocStore
@@ -66,6 +71,7 @@ data FileStore = FileStore
   , readPendingSnapshotSegment :: IndexName -> SegmentId -> IOE KengineError Segment
   , commitPendingSnapshot :: IndexName -> SegmentId -> IOE KengineError ()
   , truncateWAL :: IndexName -> DocId -> IOE KengineError ()
+  , deleteSegments :: IndexName -> [SegmentId] -> IOE KengineError ()
   }
 
 mkFileStore :: IO FileStore
@@ -80,6 +86,7 @@ mkFileStore' dir =
     , storeDoc = storeDoc' dir
     , readDocs = readDocs' dir
     , readSnapshots = readSnapshots' dir
+    , readFullSnapshots = readFullSnapshots' dir
     , indexDir = pathToIdx dir
     , readDiskFieldIndex = readDiskFieldIndex' dir
     , readDiskDoc = readDiskDoc' dir
@@ -87,6 +94,7 @@ mkFileStore' dir =
     , readPendingSnapshotSegment = readPendingSnapshotSegment' dir
     , commitPendingSnapshot = commitPendingSnapshot' dir
     , truncateWAL = truncateWAL' dir
+    , deleteSegments = deleteSegments' dir
     }
 
 fileNameForNextSegment :: Maybe Segment -> FilePath
@@ -122,15 +130,31 @@ readSnapshots' ::
   IndexName ->
   IOE KengineError [(Header, FieldStats, Segment)]
 readSnapshots' dir idxName = do
+  snap <- readAllSnapshots dir idxName
+  pure $ (\(h, _, _, fieldStats, seg) -> (h, fieldStats, seg)) <$> snap
+
+readFullSnapshots' ::
+  FilePath ->
+  IndexName ->
+  IOE KengineError [(DocStore, FieldStats, FieldIndex)]
+readFullSnapshots' dir idxName = do
+  snap <- readAllSnapshots dir idxName
+  pure $ (\(_, docs, fieldIdx, fieldStats, _) -> (docs, fieldStats, fieldIdx)) <$> snap
+
+readAllSnapshots ::
+  FilePath ->
+  IndexName ->
+  IOE KengineError [(Header, DocStore, FieldIndex, FieldStats, Segment)]
+readAllSnapshots dir idxName = do
   let idxPath = pathToIdx dir idxName
   dirContent <- listDirs idxPath
   let segs = M.mapMaybe (\f -> (f,) <$> fileNameToNum f) dirContent
   M.catMaybes <$> traverse readOne segs
   where
     readOne (fname, num) =
-      fmap (toTriple num) <$> readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> fname)
-    toTriple num (header, sparse, doc, fieldStats) =
-      (header, fieldStats, Segment sparse header.fieldNames doc num)
+      fmap (toTuple num) <$> readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> fname)
+    toTuple num (header, docStore, fieldIdx, sparse, doc, fieldStats) =
+      (header, docStore, fieldIdx, fieldStats, Segment sparse header.fieldNames doc num)
     fileNameToNum fileName = do
       rest <- stripPrefix segmentFilePrefix fileName
       readMaybe (takeWhile isDigit rest)
@@ -151,7 +175,7 @@ readDiskFieldIndex' dir idxName (Segment{fieldNames, segNum}) location = do
               (Map.singleton entry.token (Map.fromList entry.docs))
         )
           <$> blockOfTokens
-  pure (foldl' (Map.unionWith (Map.unionWith Map.union)) Map.empty indexPerEntry)
+  pure (foldl' mergeFieldIndex Map.empty indexPerEntry)
 
 readDiskDoc' ::
   FilePath -> IndexName -> Segment -> BlockLocation -> IOE KengineError DocStore
@@ -179,7 +203,7 @@ readPendingSnapshotSegment' dir idxName segId = do
     readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> pendingFileName segId)
   maybe
     (throwE (FileError "flushed segment not found"))
-    (\(h, b, dss, _) -> pure $ Segment b h.fieldNames dss segId)
+    (\(h, _, _, b, dss, _) -> pure $ Segment b h.fieldNames dss segId)
     segment
 
 commitPendingSnapshot' ::
@@ -199,6 +223,11 @@ truncateWAL' dir idxName upTo = do
   let kept = filter (\d -> d.docId > upTo) walDocs
   writeFullFile jsonLEnCodec dir idxName walFile kept
 
+deleteSegments' :: FilePath -> IndexName -> [SegmentId] -> IOE KengineError ()
+deleteSegments' dir idxName segmentIds = do
+  let fileNames = fileNameFromSegNum <$> segmentIds
+  traverse_ (deleteFile dir idxName) fileNames
+
 newline :: Word8
 newline = 10
 
@@ -214,6 +243,12 @@ writeFullFile EnCodec{encode} dir idx file a =
   liftIOE FileError ("writeFullFile " <> T.pack file) $ do
     createDirectoryIfMissing True (pathToIdx dir idx)
     BS.writeFile (pathToIdx dir idx </> file) (encode a)
+
+deleteFile ::
+  FilePath -> IndexName -> FilePath -> IOE KengineError ()
+deleteFile dir idx file =
+  liftIOE FileError ("delete file " <> T.pack file) $ do
+    removeFile (pathToIdx dir idx </> file)
 
 listDirs :: FilePath -> IOE KengineError [FilePath]
 listDirs dir =
@@ -277,12 +312,13 @@ snapshotEnCodec :: EnCodec (DocStore, FieldIndex, FieldStats)
 snapshotEnCodec = EnCodec{encode = \(a, b, c) -> encodeState a b c}
 
 -- todo smarter reading, skip reading docstore
-snapshotDeCodec :: DeCodec (Header, SparseIndex, DocSparseIndex, FieldStats)
+snapshotDeCodec ::
+  DeCodec (Header, DocStore, FieldIndex, SparseIndex, DocSparseIndex, FieldStats)
 snapshotDeCodec =
   DeCodec
     { decode =
         first (FileError . T.pack)
-          . fmap (\(h, _ds, _fi, si, dsi, fs) -> (h, si, dsi, fs))
+          . fmap (\(h, ds, fi, si, dsi, fs) -> (h, ds, fi, si, dsi, fs))
           . decodeSnapshot
     }
 

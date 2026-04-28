@@ -12,6 +12,8 @@ import Kengine.Types (
   FieldValue (KeywordVal, TextVal),
   TermFrequency (TF),
   Token (Token),
+  mergeFieldIndex,
+  mergeFieldStats,
  )
 
 updateIndex ::
@@ -32,18 +34,14 @@ updateIndex fieldIndex fieldMeta Document{docId, body} =
     allMetadataPerField :: FieldStats
     allMetadataPerField = toPerFieldMetadata <$> tokensPerField
     -- simple union is enough - this is a new doc, the doc id can not exist yet
-    mergedMeta = Map.unionWith Map.union allMetadataPerField fieldMeta
+    mergedMeta = mergeFieldStats allMetadataPerField fieldMeta
 
     -- takes FieldName -> [Token] and merges duplicates to create term frequency of
     -- each token per field
     newInvertedIndexForTouchedFields =
       fmap (Map.singleton docId) . Map.fromListWith (+) . fmap (,TF 1) <$> tokensPerField
 
-    mergedFields =
-      Map.unionWith
-        (Map.unionWith Map.union)
-        newInvertedIndexForTouchedFields
-        fieldIndex
+    mergedFields = mergeFieldIndex newInvertedIndexForTouchedFields fieldIndex
    in
     (mergedFields, mergedMeta)
   where
