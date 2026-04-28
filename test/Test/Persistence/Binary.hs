@@ -11,16 +11,20 @@ import Kengine.Persistence.Binary (
   getMany,
   getSparseIndexEntry,
   getTokenEntry,
+  getVarint,
   putDocument,
   putFieldMeta,
   putHeader,
   putSparseIndexEntry,
   putTokenEntry,
+  putVarint,
  )
 import Kengine.Types (BlockLocation (..), DocId (..), Document (..))
 
 import Data.ByteString qualified as BS
 import Data.Map qualified as Map
+import Hedgehog.Gen qualified as Gen
+import Hedgehog.Range qualified as Range
 import Test.Helpers.Generators (
   genDocForMapping,
   genFieldMeta,
@@ -55,6 +59,9 @@ spec = do
     it "roundtrips field meta" $ hedgehog $ do
       fieldMeta <- forAll genFieldMeta
       diff (C.runGet getFieldMeta (C.runPut $ putFieldMeta fieldMeta)) (==) (Right fieldMeta)
+    it "roundtrips varints" $ hedgehog $ do
+      num <- forAll $ Gen.word64 Range.constantBounded
+      diff (C.runGet getVarint (C.runPut $ putVarint num)) (==) (Right num)
     it "roundtrips whole state" $ hedgehog $ do
       (docStore, fieldIndex, metadata) <- forAll genState
       diff

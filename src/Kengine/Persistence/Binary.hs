@@ -14,6 +14,8 @@ module Kengine.Persistence.Binary (
   putSparseIndexEntry,
   encodeState,
   getHeader,
+  putVarint,
+  getVarint,
   putTokenEntry,
   getTokenEntry,
   TokenEntry (..),
@@ -25,6 +27,7 @@ module Kengine.Persistence.Binary (
 import Control.Monad (replicateM, unless, void)
 import Data.Binary (Binary (..), Word16)
 import Data.Binary qualified as B
+import Data.Bits
 import Data.ByteString qualified as BS
 import Data.Foldable (traverse_)
 import Data.List (sortOn)
@@ -367,11 +370,13 @@ putHeader
     , docMetadataOffset
     } = do
     C.putByteString "KENG"
-    C.putWord8 version
-    C.putWord32be mappingVersion
-    C.putWord32be docCount
-    C.putWord16be (fromIntegral $ length fieldNames)
+    putVarint (fromIntegral version)
+    putVarint (fromIntegral mappingVersion)
+    putVarint (fromIntegral docCount)
+    putVarint (fromIntegral $ length fieldNames)
     traverse_ putFieldName fieldNames
+    -- header offsets stay fixed-width: their size is measured before they're known,
+    -- so varint here would create a chicken-and-egg problem in encodeState.
     C.putWord64be termSparseOffset
     C.putWord64be docSparseOffset
     C.putWord64be metaSparseOffset
@@ -381,17 +386,17 @@ putHeader
       putFieldName :: FieldName -> C.Put
       putFieldName fn = do
         let bytes = encodeUtf8 (unrefine fn)
-        C.putWord16be (fromIntegral $ BS.length bytes)
+        putVarint (fromIntegral $ BS.length bytes)
         C.putByteString bytes
 
 getHeader :: C.Get Header
 getHeader = do
   keng <- C.getBytes 4
   unless (keng == "KENG") (fail "Not a kengine header.")
-  version <- C.getWord8
-  mappingVersion <- C.getWord32be
-  docCount <- C.getWord32be
-  fieldCount <- C.getWord16be
+  version <- fromIntegral <$> getVarint
+  mappingVersion <- fromIntegral <$> getVarint
+  docCount <- fromIntegral <$> getVarint
+  fieldCount <- getVarint
   fieldNames <- replicateM (fromIntegral fieldCount) getFieldName
   termSparseOffset <- C.getWord64be
   docSparseOffset <- C.getWord64be
@@ -413,7 +418,7 @@ getHeader = do
   where
     getFieldName :: C.Get FieldName
     getFieldName = do
-      fieldNameLength <- C.getWord16be
+      fieldNameLength <- getVarint
       fnNameBytes <- C.getBytes (fromIntegral fieldNameLength)
       refineFail $ decodeUtf8 fnNameBytes
 
@@ -426,31 +431,31 @@ data TokenEntry = TokenEntry
 
 putTokenEntry :: TokenEntry -> C.Put
 putTokenEntry TokenEntry{fieldId, token = (Token tkn), docs} = do
-  C.putWord16be fieldId
+  putVarint (fromIntegral fieldId)
   let tknBytes = encodeUtf8 tkn
-  C.putWord16be (fromIntegral $ BS.length tknBytes)
+  putVarint (fromIntegral $ BS.length tknBytes)
   C.putByteString tknBytes
-  C.putWord32be (fromIntegral $ length docs)
+  putVarint (fromIntegral $ length docs)
   traverse_ (uncurry putDoc) docs
   where
     putDoc :: DocId -> TermFrequency -> C.Put
     putDoc (DocId dId) (TF tf) = do
-      C.putWord32be (fromIntegral dId)
-      C.putWord32be (fromIntegral tf)
+      putVarint (fromIntegral dId)
+      putVarint (fromIntegral tf)
 
 getTokenEntry :: C.Get TokenEntry
 getTokenEntry = do
-  fieldId <- C.getWord16be
-  tokenLength <- C.getWord16be
+  fieldId <- fromIntegral <$> getVarint
+  tokenLength <- getVarint
   token <- Token . decodeUtf8 <$> C.getBytes (fromIntegral tokenLength)
-  docsCount <- C.getWord32be
+  docsCount <- getVarint
   docs <- replicateM (fromIntegral docsCount) getDoc
   pure TokenEntry{fieldId, token, docs}
   where
     getDoc :: C.Get (DocId, TermFrequency)
     getDoc = do
-      docId <- C.getWord32be
-      tf <- C.getWord32be
+      docId <- getVarint
+      tf <- getVarint
       pure (DocId (fromIntegral docId), TF (fromIntegral tf))
 
 data SparseIndexEntry = SparseIndexEntry {fieldId :: Word16, token :: Token, firstBlockOffset :: Word64}
@@ -458,18 +463,18 @@ data SparseIndexEntry = SparseIndexEntry {fieldId :: Word16, token :: Token, fir
 
 putSparseIndexEntry :: SparseIndexEntry -> C.Put
 putSparseIndexEntry SparseIndexEntry{fieldId, token = (Token tkn), firstBlockOffset} = do
-  C.putWord16be fieldId
+  putVarint (fromIntegral fieldId)
   let tknBytes = encodeUtf8 tkn
-  C.putWord16be (fromIntegral $ BS.length tknBytes)
+  putVarint (fromIntegral $ BS.length tknBytes)
   C.putByteString tknBytes
-  C.putWord64be firstBlockOffset
+  putVarint firstBlockOffset
 
 getSparseIndexEntry :: C.Get SparseIndexEntry
 getSparseIndexEntry = do
-  fieldId <- C.getWord16be
-  tokenLength <- C.getWord16be
+  fieldId <- fromIntegral <$> getVarint
+  tokenLength <- getVarint
   token <- Token . decodeUtf8 <$> C.getBytes (fromIntegral tokenLength)
-  firstBlockOffset <- C.getWord64be
+  firstBlockOffset <- getVarint
   pure SparseIndexEntry{fieldId, token, firstBlockOffset}
 
 data DocSparseEntry = DocSparseEntry {docId :: DocId, firstDocOffset :: Word64}
@@ -477,26 +482,26 @@ data DocSparseEntry = DocSparseEntry {docId :: DocId, firstDocOffset :: Word64}
 
 putDocSparseEntry :: DocSparseEntry -> C.Put
 putDocSparseEntry DocSparseEntry{docId = (DocId dId), firstDocOffset} = do
-  C.putWord32be (fromIntegral dId)
-  C.putWord64be firstDocOffset
+  putVarint (fromIntegral dId)
+  putVarint firstDocOffset
 
 getDocSparseEntry :: C.Get DocSparseEntry
 getDocSparseEntry = do
-  docId <- DocId . fromIntegral <$> C.getWord32be
-  firstDocOffset <- C.getWord64be
+  docId <- DocId . fromIntegral <$> getVarint
+  firstDocOffset <- getVarint
   pure DocSparseEntry{docId, firstDocOffset}
 
 putDocument :: Document -> C.Put
 putDocument Document{docId = DocId dId, body} = do
-  C.putWord32be (fromIntegral dId)
+  putVarint (fromIntegral dId)
   let binBody = BS.toStrict $ B.encode body
-  C.putWord32be (fromIntegral $ BS.length binBody)
+  putVarint (fromIntegral $ BS.length binBody)
   C.putByteString binBody
 
 getDocument :: C.Get Document
 getDocument = do
-  docId <- DocId . fromIntegral <$> C.getWord32be
-  bodyLength <- C.getWord32be
+  docId <- DocId . fromIntegral <$> getVarint
+  bodyLength <- getVarint
   bodyBytes <- C.getBytes (fromIntegral bodyLength)
   body <- case B.decodeOrFail (BS.fromStrict bodyBytes) of
     Right (_, _, b) -> pure b
@@ -508,16 +513,44 @@ data FieldMeta = FieldMeta {fieldId :: Word16, docId :: DocId, tokenCount :: Wor
 
 putFieldMeta :: FieldMeta -> C.Put
 putFieldMeta FieldMeta{fieldId, docId = (DocId dId), tokenCount} = do
-  C.putWord32be (fromIntegral dId)
-  C.putWord16be fieldId
-  C.putWord32be tokenCount
+  putVarint (fromIntegral dId)
+  putVarint (fromIntegral fieldId)
+  putVarint (fromIntegral tokenCount)
 
 getFieldMeta :: C.Get FieldMeta
 getFieldMeta = do
-  docId <- DocId . fromIntegral <$> C.getWord32be
-  fieldId <- C.getWord16be
-  tokenCount <- C.getWord32be
+  docId <- DocId . fromIntegral <$> getVarint
+  fieldId <- fromIntegral <$> getVarint
+  tokenCount <- fromIntegral <$> getVarint
   pure FieldMeta{fieldId, docId, tokenCount}
 
 nelChunksOf :: Int -> [e] -> [Nel.NonEmpty e]
 nelChunksOf i l = Nel.fromList <$> chunksOf i l
+
+getVarint :: C.Get Word64
+getVarint = do
+  nextByte <- C.getWord8
+  -- leading 1 indicates more bytes with data, 0 that was it
+  let hasMore = nextByte .&. 0b10000000 == 0b10000000
+  -- don't want indicator bit in result, drop if 1
+  let last7Bits :: Word8 = nextByte .&. 0b01111111
+  if hasMore
+    -- recurse, take the next words (nextWord64: 0...0 10101010 11001011) and shift 7 to left
+    -- and then add in the current 7 bits on the rigt (1110101... 0000000 OR 0...0 1010101)
+    then (\nextWord64 -> shiftL nextWord64 7 .|. fromIntegral last7Bits) <$> getVarint
+    -- no more, just return the word64 (0...0 01101010)
+    else pure (fromIntegral last7Bits)
+
+putVarint :: Word64 -> C.Put
+putVarint word =
+  let
+    -- we store the last 7 bits each step
+    last7Bits = word .&. 0b01111111
+    -- moving the to be stored bits out to the right
+    shiftedRight7 = shiftR word 7
+   in
+    if shiftedRight7 == 0
+      -- when no more bits remain in the Word64, done, from integral adds leading 0
+      then C.putWord8 (fromIntegral last7Bits)
+      -- when more to come, add a leading 1, indicates for the reader more bytes to be checked
+      else C.putWord8 (fromIntegral last7Bits .|. 0b10000000) >> putVarint shiftedRight7

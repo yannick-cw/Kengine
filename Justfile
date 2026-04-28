@@ -6,3 +6,6 @@ watch-test:
 
 test:
 	cabal test
+
+testM TEST:
+	cabal test --test-options='--match "{{TEST}}"'
