@@ -158,6 +158,28 @@ spec = do
           liftIO $ length docAfterMerge.results `shouldBe` 1
           liftIO $ length docAfterRestart.results `shouldBe` 1
 
+    it "updates a mapping" $
+      withSystemTempDirectory "kengine-test" $ \dir -> do
+        let fileStore = mkFileStore' dir
+        let docWithNewField =
+              AE.object
+                [ "some_text" AE..= ("something" :: Text)
+                , "other_field" AE..= ("apple" :: Text)
+                , "new_field" AE..= True
+                ]
+        runIOE $ do
+          store1 <- mkStore fileStore
+          _ <- store1.createIndex indexName mapping
+          store1.indexDoc indexName doc1
+          let newName :: FieldName = $$(R.refineTH "new_field")
+          _ <- store1.updateMapping indexName (Field K.Bool newName True)
+          store1.indexDoc indexName docWithNewField
+          bothDocs <- store1.search indexName (Query "apple")
+          freshStore <- mkStore fileStore
+          bothAfterRestart <- freshStore.search indexName (Query "apple")
+          liftIO $ length bothDocs.results `shouldBe` 2
+          liftIO $ length bothAfterRestart.results `shouldBe` 2
+
     it "only find the doc if it includes the full query (AND query tokens)" $ do
       hedgehog $ do
         idxName <- forAll genValidIndexName

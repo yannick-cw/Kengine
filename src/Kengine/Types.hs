@@ -154,10 +154,11 @@ instance Predicate ValidName Text where
 
 --- Respone Types
 
-data IndexResponseStatus = Created | Indexed deriving stock (Eq, Show)
+data IndexResponseStatus = Created | Indexed | MappingUpdated deriving stock (Eq, Show)
 instance ToJSON IndexResponseStatus where
   toJSON Created = "created"
   toJSON Indexed = "indexed"
+  toJSON MappingUpdated = "mapping_updated"
 newtype IndexResponse = IndexResponse {status :: IndexResponseStatus}
   deriving stock (Generic, Eq, Show)
 instance ToJSON IndexResponse

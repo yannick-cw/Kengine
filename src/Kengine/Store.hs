@@ -4,6 +4,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (ExceptT (..), throwE)
 import Data.Aeson qualified as AE
 import Data.List qualified as L
+import Data.List.NonEmpty qualified as Nel
 import Data.Map qualified as Map
 import Data.Maybe qualified as M
 import Data.Text qualified as T
@@ -24,6 +25,7 @@ import Kengine.Types (
   DocId (DocId),
   DocStore,
   Document (..),
+  Field,
   FieldIndex,
   FieldStats,
   IndexData (..),
@@ -46,6 +48,7 @@ import Validation qualified as V (validationToEither)
 data Store = Store
   { createIndex :: IndexName -> Mapping -> IOE KengineError IndexResponse
   , indexDoc :: IndexName -> AE.Value -> IOE KengineError IndexResponse
+  , updateMapping :: IndexName -> Field -> IOE KengineError IndexResponse
   , search :: IndexName -> Query -> IOE KengineError SearchResults
   , flushState :: IOE KengineError ()
   , debugLayout :: IndexName -> IOE KengineError LT.Text
@@ -58,6 +61,7 @@ mkStore fs = do
     Store
       { createIndex = createIndex' indexViewVar fs
       , indexDoc = indexDoc' indexViewVar fs
+      , updateMapping = updateMapping' indexViewVar fs
       , search = search' indexViewVar fs
       , flushState = flushState' indexViewVar fs
       , debugLayout = Layout.renderLayout fs indexViewVar
@@ -128,6 +132,30 @@ indexDoc' indexViewVar FileStore{storeDoc} name jval = do
     let updatedMemtable = memtable{fieldIdx = updatedFieldIdx, fieldMeta = updatedFieldMeta}
     TVar.writeTVar indexDataVar idxData{memtable = updatedMemtable}
   pure IndexResponse{status = Indexed}
+
+updateMapping' ::
+  TVar.TVar IndexView ->
+  FileStore ->
+  IndexName ->
+  Field ->
+  IOE KengineError IndexResponse
+updateMapping' indexViewVar FileStore{storeMapping} name newField = do
+  idxView <- liftIO $ TVar.readTVarIO indexViewVar
+  indexDataVar <- lookupIndex name idxView
+  newMapping <- ExceptT $ TVar.atomically $ do
+    idxData@IndexData{mapping} <- TVar.readTVar indexDataVar
+    let validMapping =
+          V.validationToEither $
+            validateMapping name [] mapping{fields = Nel.cons newField mapping.fields}
+    traverse
+      ( \m -> do
+          TVar.writeTVar indexDataVar idxData{mapping = m}
+          pure m
+      )
+      validMapping
+  -- danger zone here: when crashing before storing mapping, mapping is lost
+  storeMapping name newMapping
+  pure IndexResponse{status = MappingUpdated}
 
 search' ::
   TVar.TVar IndexView ->

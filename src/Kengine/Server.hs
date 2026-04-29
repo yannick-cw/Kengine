@@ -24,6 +24,7 @@ import Web.Scotty (
   text,
  )
 import Web.Scotty.Internal.Types (ScottyT)
+import Web.Scotty.Trans (patch)
 
 runServer :: IO ()
 runServer = do
@@ -36,7 +37,7 @@ runServer = do
       exitFailure
 
 routes :: Store -> ScottyT IO ()
-routes Store{createIndex, indexDoc, search, flushState, debugLayout} = do
+routes Store{createIndex, indexDoc, updateMapping, search, flushState, debugLayout} = do
   get "/indexes/:name/search" $ do
     n <- pathParam "name"
     q <- queryParam "q"
@@ -45,6 +46,10 @@ routes Store{createIndex, indexDoc, search, flushState, debugLayout} = do
     n <- pathParam "name"
     m <- jsonData
     resOrErr (createIndex n m)
+  patch "/indexes/:name/mapping" $ do
+    n <- pathParam "name"
+    newField <- jsonData
+    resOrErr (updateMapping n newField)
   post "/indexes/:name/documents" $ do
     n <- pathParam "name"
     r <- jsonData
