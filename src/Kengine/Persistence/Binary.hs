@@ -30,7 +30,7 @@ import Data.Binary qualified as B
 import Data.Bits
 import Data.ByteString qualified as BS
 import Data.Foldable (traverse_)
-import Data.List (sortOn)
+import Data.List (mapAccumL, sortOn)
 import Data.List.NonEmpty qualified as Nel
 import Data.List.Split (chunksOf)
 import Data.Map qualified as Map
@@ -66,49 +66,52 @@ instance Binary FieldName where
   put = put . unrefine
   get = refineFail =<< get
 
-{- | On-disk segment layout (written here, read by 'decodeSnapshot'):
+{- | On-disk segment layout (written here, read by 'decodeSnapshot').
+
+  Most integer fields are varint-encoded (LEB128-style: high bit of each byte = "more
+  bytes follow", low 7 bits = data). The exceptions are the magic and the five offset
+  fields in the header — those stay fixed-width Word64 BE because their byte size has
+  to be known before their values are computed in 'encodeState'.
 
   HEADER
-    "KENG"               4 bytes magic
-    version              u8
-    mappingVersion       u32 BE
-    docCount             u32 BE
-    fieldCount           u16 BE
-    fieldNames           fieldCount * (u16 len + utf8 bytes)
+    "KENG"               4 raw bytes (magic; do not change)
+    version              varint
+    mappingVersion       varint
+    docCount             varint
+    fieldCount           varint
+    fieldNames           fieldCount * (varint len + utf8 bytes)
     termSparseOffset     u64 BE   -> start of SPARSE INDEX
     docSparseOffset      u64 BE   -> start of SPARSE DOC INDEX
+    metaSparseOffset     u64 BE   -> end of file (used to size SPARSE DOC INDEX)
     storedFieldsOffset   u64 BE   -> start of STORED DOCS
     docMetadataOffset    u64 BE   -> start of FIELD METADATA
 
-  TOKEN BLOCKS  (sorted by (fieldId, token); 128 entries per block)
+  TOKEN BLOCKS  (sorted by (fieldId, token); 16 entries per block)
     per entry:
-      fieldId            u16 BE
-      token              u16 len + utf8 bytes
-      postingCount       u32 BE
-      postings           postingCount * (u32 docId, u32 tf)
+      fieldId            varint
+      token              varint len + utf8 bytes
+      postingCount       varint
+      postings           postingCount * (varint docId, varint tf)
 
   SPARSE INDEX  (one entry per token block; same sort order)
-    fieldId              u16 BE
-    token                u16 len + utf8 bytes
-    blockOffset          u64 BE   -> first byte of that block in TOKEN BLOCKS
+    fieldId              varint
+    token                varint len + utf8 bytes
+    blockOffset          varint   -> first byte of that block, relative to TOKEN BLOCKS start
 
-  STORED DOCS  (sorted by docId)
-    docId                u32 BE
-    bodyLen              u32 BE
-    body                 bodyLen bytes (Data.Binary encoding of the doc body)
+  STORED DOCS  (sorted by docId; 128 docs per block)
+    per doc:
+      docId              varint
+      bodyLen            varint
+      body               bodyLen bytes (Data.Binary encoding of the doc body)
 
   FIELD METADATA  (one per (docId, text field); sorted by docId)
-    docId                u32 BE
-    fieldId              u16 BE
-    tokenCount           u32 BE
+    docId                varint
+    fieldId              varint
+    tokenCount           varint
 
   SPARSE DOC INDEX  (one entry per doc block)
-    docId                u32 BE
-    firstBlock           u64 BE
-
-  SPARSE META INDEX (one entry per meta block)
-    docId                u32 BE
-    firstBlock           u64 BE
+    docId                varint
+    firstDocOffset       varint   -> first byte of that block, relative to STORED DOCS start
 -}
 encodeState :: DocStore -> FieldIndex -> FieldStats -> BS.ByteString
 encodeState docStore fieldIndex metadata =
@@ -436,7 +439,10 @@ putTokenEntry TokenEntry{fieldId, token = (Token tkn), docs} = do
   putVarint (fromIntegral $ BS.length tknBytes)
   C.putByteString tknBytes
   putVarint (fromIntegral $ length docs)
-  traverse_ (uncurry putDoc) docs
+  -- takes doc ids like [1001,1002,1010,1050] and compresses to [1001,1,8,40] offsets from last id
+  -- 'delte encoding'
+  let docIdsAsOffsets = snd $ mapAccumL (\lastDocId (docId, tf) -> (docId, (docId - lastDocId, tf))) 0 docs
+  traverse_ (uncurry putDoc) docIdsAsOffsets
   where
     putDoc :: DocId -> TermFrequency -> C.Put
     putDoc (DocId dId) (TF tf) = do
@@ -450,7 +456,9 @@ getTokenEntry = do
   token <- Token . decodeUtf8 <$> C.getBytes (fromIntegral tokenLength)
   docsCount <- getVarint
   docs <- replicateM (fromIntegral docsCount) getDoc
-  pure TokenEntry{fieldId, token, docs}
+  -- 'delte decoding' - from offsets [1001,1,8,40] to [1001,1002,1010,1050]
+  let docIdsFromOffsets = scanl1 (\(lastDocId, _) (docId, tf) -> (lastDocId + docId, tf)) docs
+  pure TokenEntry{fieldId, token, docs = docIdsFromOffsets}
   where
     getDoc :: C.Get (DocId, TermFrequency)
     getDoc = do
