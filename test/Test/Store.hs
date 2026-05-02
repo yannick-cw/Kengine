@@ -8,8 +8,10 @@ import Data.Aeson (ToJSON (toJSON))
 import Data.Aeson qualified as AE
 import Data.Foldable (for_)
 import Data.List.NonEmpty qualified as NEL
+import Data.List.NonEmpty qualified as Nel
 import Data.Map qualified as Map
 import Data.Text (Text)
+import Data.Text qualified as T
 import Hedgehog (annotateShow, diff, evalEither, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -31,7 +33,12 @@ import Kengine.Types (
 import Kengine.Types qualified as K
 import Refined qualified as R
 import System.IO.Temp (withSystemTempDirectory)
-import Test.Helpers.Generators (genDocForMapping, genValidIndexName, genValidMapping)
+import Test.Helpers.Generators (
+  genDocForMapping,
+  genValidIndexName,
+  genValidMapping,
+  oneCharEdit,
+ )
 import Test.Hspec (Spec, describe, it, shouldBe)
 import Test.Hspec.Hedgehog (hedgehog)
 
@@ -215,6 +222,34 @@ spec = do
 
         diff (length searchRes.results) (==) 1
         diff (length noMatch.results) (==) 0
+
+    it "fuzzy matches one character errors" $ do
+      hedgehog $ do
+        idxName <- forAll genValidIndexName
+        let fieldName :: FieldName = $$(R.refineTH "some_text")
+        m <-
+          forAll $
+            (\m -> m{fields = Field{sType = K.Text, fieldName, required = True} NEL.<| m.fields})
+              <$> genValidMapping
+        docs <- forAll $ Gen.nonEmpty (Range.linear 1 100) (genDocForMapping m)
+        let allDocs = toJSON . fmap fieldValueToJSON <$> docs
+        q <- forAll $ case Nel.head docs Map.! fieldName of
+          (TextVal txt) | T.length txt >= 5 -> oneCharEdit txt
+          (TextVal txt) -> Gen.constant txt
+          _ -> Gen.constant "Not possible"
+        annotateShow allDocs
+        searchRes <-
+          evalEither
+            =<< liftIO
+              ( withSystemTempDirectory "kengine-test" $ \dir ->
+                  runExceptT $ do
+                    Store{createIndex, indexDoc, searchFuzzy, flushState} <- mkStore (mkFileStore' dir)
+                    _ <- createIndex idxName m
+                    for_ allDocs (indexDoc idxName)
+                    searchFuzzy idxName (Query q)
+              )
+
+        diff (length searchRes.results) (>=) 1
 
 runIOE :: (Show e) => IOE e a -> IO a
 runIOE m = runExceptT m >>= either (fail . show) pure

@@ -7,6 +7,7 @@ import Data.List qualified as L
 import Data.List.NonEmpty qualified as Nel
 import Data.Map qualified as Map
 import Data.Maybe qualified as M
+import Data.Set qualified as S
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as LT
 import GHC.Conc qualified as TVar
@@ -18,7 +19,7 @@ import Kengine.Mapping (validateMapping)
 import Kengine.Persistence.Binary (Header (..))
 import Kengine.Persistence.FileStore (FileStore (..))
 import Kengine.Persistence.Flush (flushSegment)
-import Kengine.Search (searchQ)
+import Kengine.Search (expandTrigrams, searchQ)
 import Kengine.Tokenize (tokenize)
 import Kengine.Types (
   BlockLocation,
@@ -37,6 +38,7 @@ import Kengine.Types (
   Memtable (..),
   Query (..),
   SearchResults (..),
+  SearchTerm (..),
   Segment (..),
   Token,
   mergeFieldIndex,
@@ -50,6 +52,7 @@ data Store = Store
   , indexDoc :: IndexName -> AE.Value -> IOE KengineError IndexResponse
   , updateMapping :: IndexName -> Field -> IOE KengineError IndexResponse
   , search :: IndexName -> Query -> IOE KengineError SearchResults
+  , searchFuzzy :: IndexName -> Query -> IOE KengineError SearchResults
   , flushState :: IOE KengineError ()
   , debugLayout :: IndexName -> IOE KengineError LT.Text
   }
@@ -62,7 +65,8 @@ mkStore fs = do
       { createIndex = createIndex' indexViewVar fs
       , indexDoc = indexDoc' indexViewVar fs
       , updateMapping = updateMapping' indexViewVar fs
-      , search = search' indexViewVar fs
+      , search = search' indexViewVar fs False
+      , searchFuzzy = search' indexViewVar fs True
       , flushState = flushState' indexViewVar fs
       , debugLayout = Layout.renderLayout fs indexViewVar
       }
@@ -126,10 +130,15 @@ indexDoc' indexViewVar FileStore{storeDoc} name jval = do
   doc <- buildDoc indexDataVar jval
   storeDoc name doc
   liftIO $ TVar.atomically $ do
-    idxData@IndexData{memtable = memtable@Memtable{fieldIdx, fieldMeta}} <-
+    idxData@IndexData{memtable = memtable@Memtable{fieldIdx, fieldMeta, trigrams}} <-
       TVar.readTVar indexDataVar
-    let (updatedFieldIdx, updatedFieldMeta) = updateIndex fieldIdx fieldMeta doc
-    let updatedMemtable = memtable{fieldIdx = updatedFieldIdx, fieldMeta = updatedFieldMeta}
+    let (updatedFieldIdx, updatedFieldMeta, updatedTrigrams) = updateIndex fieldIdx fieldMeta trigrams doc
+    let updatedMemtable =
+          memtable
+            { fieldIdx = updatedFieldIdx
+            , fieldMeta = updatedFieldMeta
+            , trigrams = updatedTrigrams
+            }
     TVar.writeTVar indexDataVar idxData{memtable = updatedMemtable}
   pure IndexResponse{status = Indexed}
 
@@ -160,15 +169,20 @@ updateMapping' indexViewVar FileStore{storeMapping} name newField = do
 search' ::
   TVar.TVar IndexView ->
   FileStore ->
+  Bool ->
   IndexName ->
   Query ->
   Result SearchResults
-search' indexViewVar FileStore{readDiskFieldIndex, readDiskDoc} name (Query query) = do
+search' indexViewVar FileStore{readDiskFieldIndex, readDiskDoc} fuzzy name (Query query) = do
   idxView <- liftIO $ TVar.readTVarIO indexViewVar
   idxDataVar <- lookupIndex name idxView
-  IndexData{memtable = Memtable{docStore, fieldIdx, fieldMeta}, segments} <-
+  IndexData{memtable = Memtable{docStore, fieldIdx, fieldMeta, trigrams}, segments} <-
     liftIO $ TVar.readTVarIO idxDataVar
-  let qTokens = tokenize query
+  let qTokens =
+        if fuzzy
+          then expandTrigrams trigrams <$> tokenize query
+          else
+            (\tkn -> (SearchTerm{originalToken = tkn, alternatives = S.empty})) <$> tokenize query
   inveretdIdxsFromAllSegments <-
     traverse (resolveInvertedIdxsForOneSegment qTokens) segments
   -- merge from left to right, starting with in mem and then newest segment - leftmost - first
@@ -181,9 +195,14 @@ search' indexViewVar FileStore{readDiskFieldIndex, readDiskDoc} name (Query quer
     diskDocLookup docIds segment = do
       let blockLocations = L.nub $ M.mapMaybe (`resolveDocSparseIdx` segment) docIds
       mconcat <$> traverse (readDiskDoc name segment) blockLocations
-    resolveInvertedIdxsForOneSegment :: [Token] -> Segment -> Result [FieldIndex]
+    resolveInvertedIdxsForOneSegment :: [SearchTerm] -> Segment -> Result [FieldIndex]
     resolveInvertedIdxsForOneSegment tokens segment = do
-      let offsets = resolveSparseIdx tokens segment
+      let offsets =
+            resolveSparseIdx
+              ( tokens
+                  >>= (\SearchTerm{originalToken, alternatives} -> S.toList $ S.insert originalToken alternatives)
+              )
+              segment
       traverse (readDiskFieldIndex name segment) offsets
     mergeIdxs :: [FieldIndex] -> FieldIndex
     mergeIdxs = foldl' mergeFieldIndex Map.empty
@@ -219,7 +238,13 @@ createEmptyIdxData :: Mapping -> IndexData
 createEmptyIdxData validMapping =
   IndexData
     { mapping = validMapping
-    , memtable = Memtable{docStore = Map.empty, fieldIdx = Map.empty, fieldMeta = Map.empty}
+    , memtable =
+        Memtable
+          { docStore = Map.empty
+          , fieldIdx = Map.empty
+          , fieldMeta = Map.empty
+          , trigrams = Map.empty
+          }
     , segments = []
     , maxDocId = DocId 0
     }
@@ -234,10 +259,10 @@ createInitialIdxData validMapping segments docsFromLog =
     fieldMeta = foldl' mergeFieldStats Map.empty ((\(_, m, _) -> m) <$> segments)
     -- todo just for now header.docCount as max id - wont hold for deletions
     maxDocIdFromSegments = sum $ (\(h, _, _) -> DocId $ fromIntegral h.docCount) <$> segments
-    (updatedFieldIdx, updatedFieldMeta) =
+    (updatedFieldIdx, updatedFieldMeta, updatedTrigrams) =
       foldl'
-        (\(fieldIdx, meta) nextDoc -> updateIndex fieldIdx meta nextDoc)
-        (Map.empty, fieldMeta)
+        (\(fieldIdx, meta, trigrams) nextDoc -> updateIndex fieldIdx meta trigrams nextDoc)
+        (Map.empty, fieldMeta, Map.empty)
         docsFromAppendLog
     maxDocId = foldl' max maxDocIdFromSegments ((.docId) <$> docsFromLog)
    in
@@ -248,6 +273,7 @@ createInitialIdxData validMapping segments docsFromLog =
             { docStore = docsFromAppendLog
             , fieldIdx = updatedFieldIdx
             , fieldMeta = updatedFieldMeta
+            , trigrams = updatedTrigrams
             }
       , -- todo needs file path as param to segement
         segments = (\(_, _, s) -> s) <$> segments

@@ -1,9 +1,13 @@
-module Kengine.Search (searchQ) where
+module Kengine.Search (searchQ, expandTrigrams) where
 
 import Data.List qualified as L
 import Data.List.NonEmpty qualified as NEL
 import Data.Map qualified as Map
+import Data.Maybe qualified as M
 import Data.Ord (Down (Down))
+import Data.Set qualified as S
+import Data.Text qualified as T
+import Data.Text.Metrics qualified as TM
 import Kengine.Errors (Result)
 import Kengine.Types (
   BM25 (..),
@@ -13,18 +17,23 @@ import Kengine.Types (
   FieldIndex,
   FieldName,
   FieldStats,
+  FieldTrigrams,
   InvertedIndex,
+  PostingList,
   Score (Score),
   SearchResult (..),
+  SearchTerm (..),
   TermFrequency (TF),
-  Token,
+  Token (..),
+  Trigram,
   mergeDocStore,
  )
+import Refined (refineFail)
 
 -- todo we should not pass docstore and metadata at all - it should come from a unified search interface that internally
 -- resolves wherever search comes from
 searchQ ::
-  [Token] ->
+  [SearchTerm] ->
   DocStore ->
   FieldIndex ->
   FieldStats ->
@@ -62,12 +71,20 @@ searchQ tokenizedQ docStore fieldIndex fieldMeta docDiskLookup =
         -- core search logic decision - we could also concat instead that would allow
         -- if single terms would not be found
         -- each NEL entry is for one search token
-        matchingDocs :: Maybe (NEL.NonEmpty (Map.Map DocId TermFrequency))
-        matchingDocs = traverse (invertedIndex Map.!?) tokenizedQ >>= NEL.nonEmpty
+        -- alternatives for each token are mean just any of those needs to match
+        matchingDocs :: Maybe (NEL.NonEmpty (NEL.NonEmpty PostingList))
+        matchingDocs =
+          traverse
+            ( \SearchTerm{originalToken, alternatives} ->
+                NEL.nonEmpty
+                  (M.mapMaybe (invertedIndex Map.!?) (S.toList $ S.insert originalToken alternatives))
+            )
+            tokenizedQ
+            >>= NEL.nonEmpty
 
         -- TF -> BM25 score for each doc
         docsWithScore :: Maybe (NEL.NonEmpty (Map.Map DocId BM25))
-        docsWithScore = fmap (calcbm25 metadataForFieldname) <$> matchingDocs
+        docsWithScore = (fmap (calcbm25 metadataForFieldname . foldl1 Map.union) <$> matchingDocs)
 
         -- crucial, we always insercet -> only documents survice that had a results for EACH search token
         docsWithAllTkns = maybe Map.empty (foldl1 (Map.intersectionWith (+))) docsWithScore
@@ -106,3 +123,24 @@ searchQ tokenizedQ docStore fieldIndex fieldMeta docDiskLookup =
             total = sum $ (\(DocFieldStats count) -> count) <$> m
         totalDocScore :: Float -> DocId -> Float
         totalDocScore tf docId = idf * (tf * (1.2 + 1)) / (tf + 1.2 * (1 - 0.75 + 0.75 * (dl docId / avgdl docsMeta)))
+
+expandTrigrams :: FieldTrigrams -> Token -> SearchTerm
+expandTrigrams fnTrigrams searchToken@(Token tkn) =
+  SearchTerm
+    { originalToken = searchToken
+    , alternatives =
+        S.unions $
+          S.map
+            ( \(trigram :: Trigram) ->
+                let
+                  -- flattening down the trigrams across fields, for qyery enriching this is okay, as if no match if will be fit
+                  trigrams = foldl' Map.union Map.empty fnTrigrams
+                  potentialTerms = Map.findWithDefault S.empty trigram trigrams
+                 in
+                  S.filter (levenshtein searchToken) potentialTerms
+            )
+            (S.fromList (M.mapMaybe (refineFail . T.take 3) (T.tails tkn)))
+    }
+  where
+    levenshtein :: Token -> Token -> Bool
+    levenshtein (Token tk1) (Token tk2) = TM.levenshtein tk1 tk2 <= 1

@@ -110,6 +110,7 @@ library
         transformers,
         http-types,
         binary,
+        text-metrics,
         split,
         cereal,
         directory,

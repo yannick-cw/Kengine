@@ -61,6 +61,9 @@ Content-Type: application/json
 ### Search
 GET http://localhost:3333/indexes/products/search?q=bio
 
+### Fuzzy
+GET http://localhost:3333/indexes/products/search?q=Mulch&fuzzy=true
+
 ### Search other index
 GET http://localhost:3333/indexes/items/search?q=test
 

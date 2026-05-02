@@ -24,7 +24,7 @@ import Web.Scotty (
   text,
  )
 import Web.Scotty.Internal.Types (ScottyT)
-import Web.Scotty.Trans (patch)
+import Web.Scotty.Trans (patch, queryParamMaybe)
 
 runServer :: IO ()
 runServer = do
@@ -37,11 +37,12 @@ runServer = do
       exitFailure
 
 routes :: Store -> ScottyT IO ()
-routes Store{createIndex, indexDoc, updateMapping, search, flushState, debugLayout} = do
+routes Store{createIndex, indexDoc, updateMapping, search, searchFuzzy, flushState, debugLayout} = do
   get "/indexes/:name/search" $ do
     n <- pathParam "name"
     q <- queryParam "q"
-    resOrErr (search n q)
+    fuzzy :: Maybe Bool <- queryParamMaybe "fuzzy"
+    resOrErr ((if fuzzy == Just True then searchFuzzy else search) n q)
   put "/indexes/:name" $ do
     n <- pathParam "name"
     m <- jsonData

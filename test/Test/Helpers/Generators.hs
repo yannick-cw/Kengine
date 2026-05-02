@@ -1,5 +1,6 @@
 module Test.Helpers.Generators (
   genValidMappingRequiredField,
+  oneCharEdit,
   genFieldMeta,
   genSparseIndexEntry,
   genTokenEntry,
@@ -243,3 +244,20 @@ genState = do
     genMetaMap =
       Gen.map (Range.linear 1 5) $
         (,) <$> genDocId <*> (DocFieldStats <$> Gen.int (Range.linear 0 100))
+
+oneCharEdit :: Text -> Gen Text
+oneCharEdit txt = Gen.choice [insertOp, deleteOp, substituteOp]
+  where
+    n = T.length txt
+    insertOp = do
+      pos <- Gen.int (Range.constant 0 n)
+      c <- Gen.alpha
+      pure $ T.take pos txt <> T.singleton c <> T.drop pos txt
+    deleteOp = do
+      pos <- Gen.int (Range.constant 0 (n - 1))
+      pure $ T.take pos txt <> T.drop (pos + 1) txt
+    substituteOp = do
+      pos <- Gen.int (Range.constant 0 (n - 1))
+      let original = T.index txt pos
+      c <- Gen.filter (/= original) Gen.alpha
+      pure $ T.take pos txt <> T.singleton c <> T.drop (pos + 1) txt

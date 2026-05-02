@@ -1,5 +1,6 @@
 module Kengine.Persistence.Flush (flushSegment) where
 
+import Control.Concurrent (threadDelay)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map qualified as Map
 import GHC.Conc qualified as TVar
@@ -68,6 +69,7 @@ flushSegment
           multiStepSegmentUpdate nextSegmentId totalDocStore totalFieldIdx totalStats maxDocId
         -- IF crash here -> startup reads existing segs + this huge seg, not ideal
         updateIndexVar maxDocId (const [newSeg])
+        liftIO $ threadDelay 1000000 -- 1 sec - we wait so readers still reading the old file are safe
         deleteSegments idxName ((.segNum) <$> segments)
 
       multiStepSegmentUpdate ::

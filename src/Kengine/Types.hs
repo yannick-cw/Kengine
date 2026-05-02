@@ -1,6 +1,11 @@
 module Kengine.Types (
   BM25 (..),
+  FieldTrigrams,
+  mergeTrigrams,
+  SearchTerm (..),
   newestSegment,
+  Trigrams,
+  Trigram,
   DocSparseIndex,
   Memtable (..),
   Segment (..),
@@ -46,6 +51,7 @@ import Data.List.NonEmpty qualified as L
 import Data.Map qualified as Map
 import Data.Maybe (listToMaybe)
 import Data.Ord (Down (..))
+import Data.Set qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T (all, null)
 import Data.Text.Lazy qualified as LT
@@ -55,6 +61,7 @@ import GHC.Generics (Generic)
 import Refined (
   Predicate (validate),
   Refined,
+  SizeEqualTo,
   displayRefineException,
   refine,
   success,
@@ -78,6 +85,8 @@ type FieldIndex = Map.Map FieldName InvertedIndex
 type SparseIndex = Map.Map (FieldName, Token) BlockLocation
 type DocSparseIndex = Map.Map DocId BlockLocation
 type DocStore = Map.Map DocId Document
+type Trigrams = Map.Map Trigram (S.Set Token)
+type FieldTrigrams = Map.Map FieldName Trigrams
 
 -- left-biased
 mergeDocStore :: DocStore -> DocStore -> DocStore
@@ -86,6 +95,10 @@ mergeDocStore = Map.union
 -- left-biased at the innermost (DocId)
 mergeFieldIndex :: FieldIndex -> FieldIndex -> FieldIndex
 mergeFieldIndex = Map.unionWith (Map.unionWith Map.union)
+
+-- merges innermost tokens
+mergeTrigrams :: FieldTrigrams -> FieldTrigrams -> FieldTrigrams
+mergeTrigrams = Map.unionWith Map.union
 
 -- left-biased at the innermost (DocId) level
 mergeFieldStats :: FieldStats -> FieldStats -> FieldStats
@@ -96,7 +109,12 @@ newtype DocFieldStats = DocFieldStats {totalTokens :: Int}
   deriving newtype (Eq, Num, Show)
   deriving stock (Generic)
 
-data Memtable = Memtable {docStore :: DocStore, fieldIdx :: FieldIndex, fieldMeta :: FieldStats}
+data Memtable = Memtable
+  { docStore :: DocStore
+  , fieldIdx :: FieldIndex
+  , fieldMeta :: FieldStats
+  , trigrams :: FieldTrigrams
+  }
 newtype SegmentId = SegmentId Int
   deriving newtype (Eq, Ord, Num, Show, Read)
   deriving stock (Generic)
@@ -137,10 +155,11 @@ data SearchType = Text | Keyword | Bool | Number deriving stock (Eq, Show, Gener
 instance FromJSON SearchType
 instance ToJSON SearchType
 
-newtype Query = Query Text
+newtype Query = Query Text deriving newtype (Show)
 instance Parsable Query where
   parseParam = Right . Query . LT.toStrict
 
+type Trigram = Refined (SizeEqualTo 3) Text
 type FieldName = Refined ValidName Text
 type IndexName = Refined ValidName Text
 instance Parsable IndexName where
@@ -177,6 +196,8 @@ instance ToJSON DocId where
 instance FromJSON DocId where
   parseJSON v = DocId <$> parseJSON v
 
+data SearchTerm = SearchTerm {originalToken :: Token, alternatives :: S.Set Token}
+  deriving stock (Ord, Eq)
 newtype Token = Token Text
   deriving newtype (Show, Eq, Ord)
   deriving stock (Generic)

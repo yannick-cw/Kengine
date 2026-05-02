@@ -1,6 +1,8 @@
 module Kengine.Index.Update (updateIndex) where
 
 import Data.Map qualified as Map
+import Data.Maybe qualified as M
+import Data.Set qualified as S
 import Data.Text qualified as T
 import Kengine.Tokenize (tokenize)
 import Kengine.Types (
@@ -9,19 +11,24 @@ import Kengine.Types (
   Document (..),
   FieldIndex,
   FieldStats,
+  FieldTrigrams,
   FieldValue (KeywordVal, TextVal),
   TermFrequency (TF),
   Token (Token),
+  Trigram,
   mergeFieldIndex,
   mergeFieldStats,
+  mergeTrigrams,
  )
+import Refined (refineFail)
 
 updateIndex ::
   FieldIndex ->
   FieldStats ->
+  FieldTrigrams ->
   Document ->
-  (FieldIndex, FieldStats)
-updateIndex fieldIndex fieldMeta Document{docId, body} =
+  (FieldIndex, FieldStats, FieldTrigrams)
+updateIndex fieldIndex fieldMeta trigrams Document{docId, body} =
   let
     tokensPerField =
       Map.mapMaybe
@@ -41,9 +48,20 @@ updateIndex fieldIndex fieldMeta Document{docId, body} =
     newInvertedIndexForTouchedFields =
       fmap (Map.singleton docId) . Map.fromListWith (+) . fmap (,TF 1) <$> tokensPerField
 
+    -- for each token per field
+    -- builds a new map of trigram -> token, union to bigger map of fieldname -> trigram -> [token]
+    newFieldTrigrams = do
+      (fieldName, tokens) <- Map.toList tokensPerField
+      token <- tokens
+      trigram <- tokenToTrigams token
+      pure (Map.singleton fieldName (Map.singleton trigram (S.singleton token)))
+
     mergedFields = mergeFieldIndex newInvertedIndexForTouchedFields fieldIndex
+    mergedTrigrams = foldl' mergeTrigrams trigrams newFieldTrigrams
    in
-    (mergedFields, mergedMeta)
+    (mergedFields, mergedMeta, mergedTrigrams)
   where
     toPerFieldMetadata :: [Token] -> Map.Map DocId DocFieldStats
     toPerFieldMetadata tkns = Map.singleton docId (DocFieldStats{totalTokens = length tkns})
+    tokenToTrigams :: Token -> [Trigram]
+    tokenToTrigams (Token tkn) = M.mapMaybe (refineFail . T.take 3) (T.tails tkn)

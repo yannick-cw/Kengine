@@ -4,6 +4,7 @@ module Test.Search (spec) where
 
 import Control.Monad.Trans.Except (runExceptT)
 import Data.Map qualified as Map
+import Data.Set qualified as S
 import Kengine.Errors (IOE)
 import Kengine.Search (searchQ)
 import Kengine.Types (
@@ -14,6 +15,7 @@ import Kengine.Types (
   FieldValue (TextVal),
   Score (..),
   SearchResult (..),
+  SearchTerm (..),
   TermFrequency (..),
   Token (..),
  )
@@ -59,7 +61,12 @@ spec = do
             fieldName
             (Map.fromList [(DocId 1, DocFieldStats 5), (DocId 2, DocFieldStats 10)])
         searchResIO =
-          searchQ [Token "test"] docStoreFstHalf fieldIndex fieldMeta (\_ -> pure docStoreSndHalf)
+          searchQ
+            [SearchTerm{originalToken = Token "test", alternatives = S.empty}]
+            docStoreFstHalf
+            fieldIndex
+            fieldMeta
+            (\_ -> pure docStoreSndHalf)
         idf = log ((2 - 2 + 0.5) / (2 + 0.5) + 1)
         doc1 = idf * (10 * (1.2 + 1)) / (10 + 1.2 * (1 - 0.75 + 0.75 * (5 / 7.5)))
         doc2 = idf * (5 * (1.2 + 1)) / (5 + 1.2 * (1 - 0.75 + 0.75 * (10 / 7.5)))
@@ -95,7 +102,7 @@ spec = do
             (Map.fromList [(DocId 1, DocFieldStats 5), (DocId 2, DocFieldStats 10)])
         searchResIO =
           searchQ
-            [Token "and", Token "test"]
+            [SearchTerm (Token "and") S.empty, SearchTerm (Token "test") S.empty]
             docStoreFstHalf
             fieldIndex
             fieldMeta
