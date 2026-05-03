@@ -238,7 +238,7 @@ spec = do
           (TextVal txt) -> Gen.constant txt
           _ -> Gen.constant "Not possible"
         annotateShow allDocs
-        searchRes <-
+        (resBeforeFlush, resAfterFlush, afterStart) <-
           evalEither
             =<< liftIO
               ( withSystemTempDirectory "kengine-test" $ \dir ->
@@ -246,10 +246,19 @@ spec = do
                     Store{createIndex, indexDoc, searchFuzzy, flushState} <- mkStore (mkFileStore' dir)
                     _ <- createIndex idxName m
                     for_ allDocs (indexDoc idxName)
-                    searchFuzzy idxName (Query q)
+                    beforeFlush <- searchFuzzy idxName (Query q)
+                    flushState
+                    afterFlush <- searchFuzzy idxName (Query q)
+                    flushState
+                    flushState
+                    freshStore <- mkStore (mkFileStore' dir)
+                    afterStart <- freshStore.searchFuzzy idxName (Query q)
+                    pure (beforeFlush, afterFlush, afterStart)
               )
 
-        diff (length searchRes.results) (>=) 1
+        diff (length resBeforeFlush.results) (>=) 1
+        diff (length resAfterFlush.results) (>=) 1
+        diff (length afterStart.results) (>=) 1
 
 runIOE :: (Show e) => IOE e a -> IO a
 runIOE m = runExceptT m >>= either (fail . show) pure

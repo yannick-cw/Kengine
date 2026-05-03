@@ -35,6 +35,7 @@ import Kengine.Types (
   Field (..),
   FieldIndex,
   FieldStats,
+  FieldTrigrams,
   IndexData (..),
   IndexName,
   IndexView,
@@ -79,8 +80,9 @@ data SegmentInfo = SegmentInfo
   , docsSparseIndex :: DocSparseIndex
   }
 
-toSegmentInfo :: FilePath -> (Header, FieldStats, Segment) -> IO SegmentInfo
-toSegmentInfo dir (h, _, Segment{sparseIndex, docsSparseIndex, segNum}) = do
+toSegmentInfo ::
+  FilePath -> (Header, FieldStats, FieldTrigrams, Segment) -> IO SegmentInfo
+toSegmentInfo dir (h, _, _, Segment{sparseIndex, docsSparseIndex, segNum}) = do
   let path = dir </> fileNameFromSegNum segNum
   sz <- getFileSize path
   pure
@@ -321,31 +323,32 @@ renderSegments segs =
   mconcat (renderSegment <$> L.sortOn (Down . (.segId)) segs)
 
 renderSegment :: SegmentInfo -> B.Builder
-renderSegment si@SegmentInfo
-                { segId = SegmentId n
-                , filePath
-                , fileSize = sz
-                , header = h
-                , sparseIndex
-                , docsSparseIndex
-                } =
-  section
-    (T.pack ("segment " <> show n))
-    (Just (T.pack ("seg_" <> show n <> ".bin")))
-    <> pathLine filePath
-    <> raw "<table>"
-    <> kv "size" (formatBytes sz)
-    <> kv "version" (formatNum (fromIntegral h.version :: Int))
-    <> kv "mappingVersion" (formatNum (fromIntegral h.mappingVersion :: Int))
-    <> kv "docCount" (formatNum (fromIntegral h.docCount :: Int))
-    <> kv "fieldNames" (escT (T.intercalate ", " (unrefine <$> h.fieldNames)))
-    <> kv "term sparse anchors" (formatNum (Map.size sparseIndex))
-    <> kv "doc sparse anchors" (formatNum (Map.size docsSparseIndex))
-    <> raw "</table>"
-    <> renderLayoutBar (segmentSections si)
-    <> renderSectionTable (segmentSections si)
-    <> termSparseTable sparseIndex
-    <> docSparseTable docsSparseIndex
+renderSegment
+  si@SegmentInfo
+    { segId = SegmentId n
+    , filePath
+    , fileSize = sz
+    , header = h
+    , sparseIndex
+    , docsSparseIndex
+    } =
+    section
+      (T.pack ("segment " <> show n))
+      (Just (T.pack ("seg_" <> show n <> ".bin")))
+      <> pathLine filePath
+      <> raw "<table>"
+      <> kv "size" (formatBytes sz)
+      <> kv "version" (formatNum (fromIntegral h.version :: Int))
+      <> kv "mappingVersion" (formatNum (fromIntegral h.mappingVersion :: Int))
+      <> kv "docCount" (formatNum (fromIntegral h.docCount :: Int))
+      <> kv "fieldNames" (escT (T.intercalate ", " (unrefine <$> h.fieldNames)))
+      <> kv "term sparse anchors" (formatNum (Map.size sparseIndex))
+      <> kv "doc sparse anchors" (formatNum (Map.size docsSparseIndex))
+      <> raw "</table>"
+      <> renderLayoutBar (segmentSections si)
+      <> renderSectionTable (segmentSections si)
+      <> termSparseTable sparseIndex
+      <> docSparseTable docsSparseIndex
 
 segmentSections :: SegmentInfo -> [(Text, Text, Int, Int)]
 segmentSections SegmentInfo{fileSize = sz, header = h} =

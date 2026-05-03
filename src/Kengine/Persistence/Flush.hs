@@ -11,6 +11,7 @@ import Kengine.Types (
   DocStore,
   FieldIndex,
   FieldStats,
+  FieldTrigrams,
   IndexData (..),
   IndexName,
   Memtable (..),
@@ -19,6 +20,7 @@ import Kengine.Types (
   mergeDocStore,
   mergeFieldIndex,
   mergeFieldStats,
+  mergeTrigrams,
   newestSegment,
  )
 
@@ -36,47 +38,79 @@ flushSegment
     }
   idxName
   idxDataVar = do
-    IndexData{memtable = Memtable{docStore, fieldIdx, fieldMeta}, maxDocId, segments} <-
+    IndexData
+      { memtable = Memtable{docStore, fieldIdx, fieldMeta, trigrams}
+      , maxDocId
+      , segments
+      } <-
       liftIO $ TVar.readTVarIO idxDataVar
     -- unsafe version, overwrites old snapshot
     let nextSegmentId = maybe (SegmentId 1) ((+) 1 . (.segNum)) (newestSegment segments)
     if length segments < 5
-      then appendSegment nextSegmentId docStore fieldIdx fieldMeta maxDocId
-      else mergeSegments segments nextSegmentId docStore fieldIdx fieldMeta maxDocId
+      then appendSegment nextSegmentId docStore fieldIdx fieldMeta trigrams maxDocId
+      else mergeSegments segments nextSegmentId docStore fieldIdx fieldMeta trigrams maxDocId
     where
       appendSegment ::
-        SegmentId -> DocStore -> FieldIndex -> FieldStats -> DocId -> Result ()
-      appendSegment nextSegmentId docStore fieldIdx fieldMeta maxDocId = do
+        SegmentId -> DocStore -> FieldIndex -> FieldStats -> FieldTrigrams -> DocId -> Result ()
+      appendSegment nextSegmentId docStore fieldIdx fieldMeta fieldTris maxDocId = do
         let thisSegFieldMeta = (`Map.restrictKeys` Map.keysSet docStore) <$> fieldMeta
-        newSeg <- multiStepSegmentUpdate nextSegmentId docStore fieldIdx thisSegFieldMeta maxDocId
+        let thisSegTrigrams = fieldTris `Map.restrictKeys` Map.keysSet fieldIdx
+        newSeg <-
+          multiStepSegmentUpdate
+            nextSegmentId
+            docStore
+            fieldIdx
+            thisSegFieldMeta
+            thisSegTrigrams
+            maxDocId
         updateIndexVar maxDocId (newSeg :)
 
       mergeSegments ::
-        [Segment] -> SegmentId -> DocStore -> FieldIndex -> FieldStats -> DocId -> Result ()
-      mergeSegments segments nextSegmentId docStore fieldIdx fieldMeta maxDocId = do
+        [Segment] ->
+        SegmentId ->
+        DocStore ->
+        FieldIndex ->
+        FieldStats ->
+        FieldTrigrams ->
+        DocId ->
+        Result ()
+      mergeSegments segments nextSegmentId docStore fieldIdx fieldMeta fieldTris maxDocId = do
         snaps <- readFullSnapshots idxName
-        let (totalDocStore, totalFieldIdx, totalStats) =
+        let (totalDocStore, totalFieldIdx, totalStats, totalTrigrams) =
               foldl'
-                ( \(ds, fdx, fm) (segDocStore, segStas, segFdx) ->
+                ( \(ds, fdx, fm, ft) (segDocStore, segStas, segFdx, tri) ->
                     ( mergeDocStore ds segDocStore
                     , mergeFieldIndex fdx segFdx
                     , mergeFieldStats fm segStas
+                    , mergeTrigrams ft tri
                     )
                 )
-                (docStore, fieldIdx, fieldMeta)
+                (docStore, fieldIdx, fieldMeta, fieldTris)
                 snaps
         newSeg <-
-          multiStepSegmentUpdate nextSegmentId totalDocStore totalFieldIdx totalStats maxDocId
+          multiStepSegmentUpdate
+            nextSegmentId
+            totalDocStore
+            totalFieldIdx
+            totalStats
+            totalTrigrams
+            maxDocId
         -- IF crash here -> startup reads existing segs + this huge seg, not ideal
         updateIndexVar maxDocId (const [newSeg])
         liftIO $ threadDelay 1000000 -- 1 sec - we wait so readers still reading the old file are safe
         deleteSegments idxName ((.segNum) <$> segments)
 
       multiStepSegmentUpdate ::
-        SegmentId -> DocStore -> FieldIndex -> FieldStats -> DocId -> Result Segment
-      multiStepSegmentUpdate nextSeg docStore fieldIdx stats maxDocId = do
+        SegmentId ->
+        DocStore ->
+        FieldIndex ->
+        FieldStats ->
+        FieldTrigrams ->
+        DocId ->
+        Result Segment
+      multiStepSegmentUpdate nextSeg docStore fieldIdx stats tris maxDocId = do
         -- write, rename flow, if during write crash -> no rename -> no corrupted file
-        writePendingSnapshot idxName nextSeg (docStore, fieldIdx, stats)
+        writePendingSnapshot idxName nextSeg (docStore, fieldIdx, stats, tris)
         -- read new sparse index + fieldnames
         newSeg <- readPendingSnapshotSegment idxName nextSeg
         -- rename file, removes .new basically

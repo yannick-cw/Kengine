@@ -29,6 +29,7 @@ import Kengine.Types (
   Field,
   FieldIndex,
   FieldStats,
+  FieldTrigrams,
   IndexData (..),
   IndexName,
   IndexResponse (..),
@@ -43,6 +44,7 @@ import Kengine.Types (
   Token,
   mergeFieldIndex,
   mergeFieldStats,
+  mergeTrigrams,
  )
 import Refined (unrefine)
 import Validation qualified as V (validationToEither)
@@ -251,18 +253,19 @@ createEmptyIdxData validMapping =
 
 createInitialIdxData ::
   Mapping ->
-  [(Header, FieldStats, Segment)] ->
+  [(Header, FieldStats, FieldTrigrams, Segment)] ->
   [Document] ->
   IndexData
 createInitialIdxData validMapping segments docsFromLog =
   let
-    fieldMeta = foldl' mergeFieldStats Map.empty ((\(_, m, _) -> m) <$> segments)
+    fieldMeta = foldl' mergeFieldStats Map.empty ((\(_, m, _, _) -> m) <$> segments)
+    diskTrigrams = foldl' mergeTrigrams Map.empty ((\(_, _, t, _) -> t) <$> segments)
     -- todo just for now header.docCount as max id - wont hold for deletions
-    maxDocIdFromSegments = sum $ (\(h, _, _) -> DocId $ fromIntegral h.docCount) <$> segments
+    maxDocIdFromSegments = sum $ (\(h, _, _, _) -> DocId $ fromIntegral h.docCount) <$> segments
     (updatedFieldIdx, updatedFieldMeta, updatedTrigrams) =
       foldl'
         (\(fieldIdx, meta, trigrams) nextDoc -> updateIndex fieldIdx meta trigrams nextDoc)
-        (Map.empty, fieldMeta, Map.empty)
+        (Map.empty, fieldMeta, diskTrigrams)
         docsFromAppendLog
     maxDocId = foldl' max maxDocIdFromSegments ((.docId) <$> docsFromLog)
    in
@@ -276,7 +279,7 @@ createInitialIdxData validMapping segments docsFromLog =
             , trigrams = updatedTrigrams
             }
       , -- todo needs file path as param to segement
-        segments = (\(_, _, s) -> s) <$> segments
+        segments = (\(_, _, _, s) -> s) <$> segments
       , maxDocId
       }
   where

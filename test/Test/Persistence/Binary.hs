@@ -11,12 +11,14 @@ import Kengine.Persistence.Binary (
   getMany,
   getSparseIndexEntry,
   getTokenEntry,
+  getTrigramEntry,
   getVarint,
   putDocument,
   putFieldMeta,
   putHeader,
   putSparseIndexEntry,
   putTokenEntry,
+  putTrigramEntry,
   putVarint,
  )
 import Kengine.Types (BlockLocation (..), DocId (..), Document (..))
@@ -32,6 +34,7 @@ import Test.Helpers.Generators (
   genSparseIndexEntry,
   genState,
   genTokenEntry,
+  genTrigramEntry,
   genValidMapping,
  )
 import Test.Hspec (Spec, describe, it)
@@ -59,23 +62,29 @@ spec = do
     it "roundtrips field meta" $ hedgehog $ do
       fieldMeta <- forAll genFieldMeta
       diff (C.runGet getFieldMeta (C.runPut $ putFieldMeta fieldMeta)) (==) (Right fieldMeta)
+    it "roundtrips trigrams" $ hedgehog $ do
+      trigramEntry <- forAll genTrigramEntry
+      diff
+        (C.runGet getTrigramEntry (C.runPut $ putTrigramEntry trigramEntry))
+        (==)
+        (Right trigramEntry)
     it "roundtrips varints" $ hedgehog $ do
       num <- forAll $ Gen.word64 Range.constantBounded
       diff (C.runGet getVarint (C.runPut $ putVarint num)) (==) (Right num)
     it "roundtrips whole state" $ hedgehog $ do
-      (docStore, fieldIndex, metadata) <- forAll genState
+      (docStore, fieldIndex, metadata, trigrams) <- forAll genState
       diff
         -- ignoring sparse index + header, derived struture
-        ( (\(_, a, b, _, _, d) -> (a, b, d))
-            <$> decodeSnapshot (encodeState docStore fieldIndex metadata)
+        ( (\(_, a, b, _, _, d, e) -> (a, b, d, e))
+            <$> decodeSnapshot (encodeState docStore fieldIndex metadata trigrams)
         )
         (==)
-        (Right (docStore, fieldIndex, metadata))
+        (Right (docStore, fieldIndex, metadata, trigrams))
     it "creates sparse index for docs that can retrieve docs" $ hedgehog $ do
-      (docStore, fieldIndex, metadata) <- forAll genState
+      (docStore, fieldIndex, metadata, trigrams) <- forAll genState
       let docToFind = head $ Map.keys docStore
-      let encodedBytes = encodeState docStore fieldIndex metadata
-      (_, _, _, _, docIdx, _) <- evalEither $ decodeSnapshot encodedBytes
+      let encodedBytes = encodeState docStore fieldIndex metadata trigrams
+      (_, _, _, _, docIdx, _, _) <- evalEither $ decodeSnapshot encodedBytes
       (_, BlockLocation{firstByte, size}) <- evalMaybe $ Map.lookupLE docToFind docIdx
       let blockBytes = BS.take size (BS.drop firstByte encodedBytes)
       eles <- evalEither $ C.runGet (getMany getDocument) blockBytes

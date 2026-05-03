@@ -3,6 +3,7 @@ module Test.Helpers.Generators (
   oneCharEdit,
   genFieldMeta,
   genSparseIndexEntry,
+  genTrigramEntry,
   genTokenEntry,
   genValidMapping,
   genValidField,
@@ -30,6 +31,7 @@ import Data.Char (isAlphaNum)
 import Data.List.NonEmpty qualified as NE
 import Data.Map qualified as Map
 import Data.Maybe qualified as M
+import Data.Set qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word32)
@@ -41,6 +43,7 @@ import Kengine.Persistence.Binary (
   Header (..),
   SparseIndexEntry (..),
   TokenEntry (..),
+  TrigramEntry (..),
  )
 import Kengine.Types (
   DocFieldStats (..),
@@ -51,6 +54,7 @@ import Kengine.Types (
   FieldIndex,
   FieldName,
   FieldStats,
+  FieldTrigrams,
   FieldValue (..),
   IndexName,
   Mapping (..),
@@ -59,7 +63,7 @@ import Kengine.Types (
   Token (..),
   ValidName,
  )
-import Refined (Refined, refine)
+import Refined (Refined, refine, refineFail)
 
 -- type generators
 
@@ -182,9 +186,9 @@ genHeader = do
   fieldNames <- Gen.list (Range.linear 1 1000) genValidFieldName
   termSparseOffset <- Gen.word64 (Range.linear 0 1000)
   docSparseOffset <- Gen.word64 (Range.linear 0 1000)
-  metaSparseOffset <- Gen.word64 (Range.linear 0 1000)
   storedFieldsOffset <- Gen.word64 (Range.linear 0 1000)
   docMetadataOffset <- Gen.word64 (Range.linear 0 1000)
+  trigramOffset <- Gen.word64 (Range.linear 0 1000)
   pure
     Header
       { version
@@ -193,9 +197,9 @@ genHeader = do
       , fieldNames
       , termSparseOffset
       , docSparseOffset
-      , metaSparseOffset
       , storedFieldsOffset
       , docMetadataOffset
+      , trigramOffset
       }
 
 genDocId :: Gen DocId
@@ -211,6 +215,13 @@ genTokenEntry = do
   docs <- Gen.list (Range.linear 1 100) ((,) <$> genDocId <*> genTF)
   pure TokenEntry{fieldId, token, docs}
 
+genTrigramEntry :: Gen TrigramEntry
+genTrigramEntry = do
+  fieldId <- Gen.word16 (Range.linear 0 1000)
+  trigram <- Gen.text (Range.singleton 3) Gen.alphaNum >>= refineFail
+  tokens <- Gen.list (Range.linear 1 10) (Token <$> genText)
+  pure TrigramEntry{fieldId, trigram, tokens}
+
 genSparseIndexEntry :: Gen SparseIndexEntry
 genSparseIndexEntry = do
   fieldId <- Gen.word16 (Range.linear 0 1000)
@@ -225,7 +236,7 @@ genFieldMeta = do
   tokenCount <- genW32
   pure FieldMeta{fieldId, docId, tokenCount}
 
-genState :: Gen (DocStore, FieldIndex, FieldStats)
+genState :: Gen (DocStore, FieldIndex, FieldStats, FieldTrigrams)
 genState = do
   mapping <- genValidMapping
   docs <- genDocsForMapping mapping
@@ -235,7 +246,9 @@ genState = do
     Map.fromList <$> traverse (\fn -> (fn,) <$> genInvertedIndex) fieldNames
   metadata <-
     Map.fromList <$> traverse (\fn -> (fn,) <$> genMetaMap) fieldNames
-  pure (docStore, fieldIndex, metadata)
+  fieldTrigrams <-
+    Map.fromList <$> traverse (\fn -> (fn,) <$> genTrigram) fieldNames
+  pure (docStore, fieldIndex, metadata, fieldTrigrams)
   where
     genInvertedIndex = Gen.map (Range.linear 1 5) $ do
       tkn <- Token <$> genTextAlphaNum
@@ -244,6 +257,9 @@ genState = do
     genMetaMap =
       Gen.map (Range.linear 1 5) $
         (,) <$> genDocId <*> (DocFieldStats <$> Gen.int (Range.linear 0 100))
+    genTrigram =
+      Gen.map (Range.linear 1 5) $
+        (\(TrigramEntry{trigram, tokens}) -> (trigram, S.fromList tokens)) <$> genTrigramEntry
 
 oneCharEdit :: Text -> Gen Text
 oneCharEdit txt = Gen.choice [insertOp, deleteOp, substituteOp]
@@ -254,10 +270,10 @@ oneCharEdit txt = Gen.choice [insertOp, deleteOp, substituteOp]
       c <- Gen.alpha
       pure $ T.take pos txt <> T.singleton c <> T.drop pos txt
     deleteOp = do
-      pos <- Gen.int (Range.constant 0 (n - 1))
+      pos <- Gen.element [0, n - 1]
       pure $ T.take pos txt <> T.drop (pos + 1) txt
     substituteOp = do
-      pos <- Gen.int (Range.constant 0 (n - 1))
+      pos <- Gen.element [0, n - 1]
       let original = T.index txt pos
       c <- Gen.filter (/= original) Gen.alpha
       pure $ T.take pos txt <> T.singleton c <> T.drop (pos + 1) txt

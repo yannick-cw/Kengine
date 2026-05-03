@@ -29,6 +29,7 @@ import Kengine.Types (
   Document (..),
   FieldIndex,
   FieldStats,
+  FieldTrigrams,
   IndexName,
   Mapping,
   Segment (..),
@@ -60,14 +61,17 @@ data FileStore = FileStore
   , storeDoc :: IndexName -> Document -> IOE KengineError ()
   , readDocs :: IndexName -> IOE KengineError [Document]
   , readSnapshots ::
-      IndexName -> IOE KengineError [(Header, FieldStats, Segment)] -- todo can be optimized to actually not read full snapshot
+      IndexName -> IOE KengineError [(Header, FieldStats, FieldTrigrams, Segment)] -- todo can be optimized to actually not read full snapshot
   , readFullSnapshots ::
-      IndexName -> IOE KengineError [(DocStore, FieldStats, FieldIndex)]
+      IndexName -> IOE KengineError [(DocStore, FieldStats, FieldIndex, FieldTrigrams)]
   , indexDir :: IndexName -> FilePath
   , readDiskFieldIndex :: IndexName -> Segment -> BlockLocation -> IOE KengineError FieldIndex
   , readDiskDoc :: IndexName -> Segment -> BlockLocation -> IOE KengineError DocStore
   , writePendingSnapshot ::
-      IndexName -> SegmentId -> (DocStore, FieldIndex, FieldStats) -> IOE KengineError ()
+      IndexName ->
+      SegmentId ->
+      (DocStore, FieldIndex, FieldStats, FieldTrigrams) ->
+      IOE KengineError ()
   , readPendingSnapshotSegment :: IndexName -> SegmentId -> IOE KengineError Segment
   , commitPendingSnapshot :: IndexName -> SegmentId -> IOE KengineError ()
   , truncateWAL :: IndexName -> DocId -> IOE KengineError ()
@@ -128,23 +132,26 @@ readDocs' dir idxName =
 readSnapshots' ::
   FilePath ->
   IndexName ->
-  IOE KengineError [(Header, FieldStats, Segment)]
+  IOE KengineError [(Header, FieldStats, FieldTrigrams, Segment)]
 readSnapshots' dir idxName = do
   snap <- readAllSnapshots dir idxName
-  pure $ (\(h, _, _, fieldStats, seg) -> (h, fieldStats, seg)) <$> snap
+  pure $
+    (\(h, _, _, fieldStats, fieldTris, seg) -> (h, fieldStats, fieldTris, seg)) <$> snap
 
 readFullSnapshots' ::
   FilePath ->
   IndexName ->
-  IOE KengineError [(DocStore, FieldStats, FieldIndex)]
+  IOE KengineError [(DocStore, FieldStats, FieldIndex, FieldTrigrams)]
 readFullSnapshots' dir idxName = do
   snap <- readAllSnapshots dir idxName
-  pure $ (\(_, docs, fieldIdx, fieldStats, _) -> (docs, fieldStats, fieldIdx)) <$> snap
+  pure $
+    (\(_, docs, fieldIdx, fieldStats, fieldTris, _) -> (docs, fieldStats, fieldIdx, fieldTris))
+      <$> snap
 
 readAllSnapshots ::
   FilePath ->
   IndexName ->
-  IOE KengineError [(Header, DocStore, FieldIndex, FieldStats, Segment)]
+  IOE KengineError [(Header, DocStore, FieldIndex, FieldStats, FieldTrigrams, Segment)]
 readAllSnapshots dir idxName = do
   let idxPath = pathToIdx dir idxName
   dirContent <- listDirs idxPath
@@ -153,8 +160,14 @@ readAllSnapshots dir idxName = do
   where
     readOne (fname, num) =
       fmap (toTuple num) <$> readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> fname)
-    toTuple num (header, docStore, fieldIdx, sparse, doc, fieldStats) =
-      (header, docStore, fieldIdx, fieldStats, Segment sparse header.fieldNames doc num)
+    toTuple num (header, docStore, fieldIdx, sparse, doc, fieldStats, fieldTris) =
+      ( header
+      , docStore
+      , fieldIdx
+      , fieldStats
+      , fieldTris
+      , Segment sparse header.fieldNames doc num
+      )
     fileNameToNum fileName = do
       rest <- stripPrefix segmentFilePrefix fileName
       readMaybe (takeWhile isDigit rest)
@@ -191,7 +204,7 @@ writePendingSnapshot' ::
   FilePath ->
   IndexName ->
   SegmentId ->
-  (DocStore, FieldIndex, FieldStats) ->
+  (DocStore, FieldIndex, FieldStats, FieldTrigrams) ->
   IOE KengineError ()
 writePendingSnapshot' dir idxName segId =
   writeFullFile snapshotEnCodec dir idxName (pendingFileName segId)
@@ -203,7 +216,7 @@ readPendingSnapshotSegment' dir idxName segId = do
     readForIdxFile snapshotDeCodec (pathToIdx dir idxName </> pendingFileName segId)
   maybe
     (throwE (FileError "flushed segment not found"))
-    (\(h, _, _, b, dss, _) -> pure $ Segment b h.fieldNames dss segId)
+    (\(h, _, _, b, dss, _, _) -> pure $ Segment b h.fieldNames dss segId)
     segment
 
 commitPendingSnapshot' ::
@@ -308,17 +321,18 @@ jsonLDeCodec =
           . L.fromStrict
     }
 
-snapshotEnCodec :: EnCodec (DocStore, FieldIndex, FieldStats)
-snapshotEnCodec = EnCodec{encode = \(a, b, c) -> encodeState a b c}
+snapshotEnCodec :: EnCodec (DocStore, FieldIndex, FieldStats, FieldTrigrams)
+snapshotEnCodec = EnCodec{encode = \(a, b, c, d) -> encodeState a b c d}
 
 -- todo smarter reading, skip reading docstore
 snapshotDeCodec ::
-  DeCodec (Header, DocStore, FieldIndex, SparseIndex, DocSparseIndex, FieldStats)
+  DeCodec
+    (Header, DocStore, FieldIndex, SparseIndex, DocSparseIndex, FieldStats, FieldTrigrams)
 snapshotDeCodec =
   DeCodec
     { decode =
         first (FileError . T.pack)
-          . fmap (\(h, ds, fi, si, dsi, fs) -> (h, ds, fi, si, dsi, fs))
+          . fmap (\(h, ds, fi, si, dsi, fs, tris) -> (h, ds, fi, si, dsi, fs, tris))
           . decodeSnapshot
     }
 

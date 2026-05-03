@@ -5,6 +5,9 @@ module Kengine.Persistence.Binary (
   decodeTokenEntry,
   putDocument,
   decodeSnapshot,
+  getTrigramEntry,
+  putTrigramEntry,
+  TrigramEntry (..),
   decodeDocument,
   getMany,
   getDocument,
@@ -35,6 +38,7 @@ import Data.List.NonEmpty qualified as Nel
 import Data.List.Split (chunksOf)
 import Data.Map qualified as Map
 import Data.Serialize qualified as C
+import Data.Set qualified as S
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Word (Word32, Word64, Word8)
 import Kengine.Types (
@@ -47,12 +51,15 @@ import Kengine.Types (
   FieldIndex,
   FieldName,
   FieldStats,
+  FieldTrigrams,
   FieldValue,
   SparseIndex,
   TermFrequency (..),
   Token (..),
+  Trigram,
   mergeFieldIndex,
   mergeFieldStats,
+  mergeTrigrams,
  )
 import Refined (refineFail, unrefine)
 
@@ -82,9 +89,9 @@ instance Binary FieldName where
     fieldNames           fieldCount * (varint len + utf8 bytes)
     termSparseOffset     u64 BE   -> start of SPARSE INDEX
     docSparseOffset      u64 BE   -> start of SPARSE DOC INDEX
-    metaSparseOffset     u64 BE   -> end of file (used to size SPARSE DOC INDEX)
     storedFieldsOffset   u64 BE   -> start of STORED DOCS
     docMetadataOffset    u64 BE   -> start of FIELD METADATA
+    trigramOffset        u64 BE   -> start of FIELD TRIGRAMS
 
   TOKEN BLOCKS  (sorted by (fieldId, token); 16 entries per block)
     per entry:
@@ -109,12 +116,17 @@ instance Binary FieldName where
     fieldId              varint
     tokenCount           varint
 
+  FIELD TRIGRAMS  (fieldname,trigram,multiple tokens)
+    fieldId              varint
+    trigram              varint len + utf8 bytes
+    tokens               tokenCount * (varint len + utf8 bytes)
+
   SPARSE DOC INDEX  (one entry per doc block)
     docId                varint
     firstDocOffset       varint   -> first byte of that block, relative to STORED DOCS start
 -}
-encodeState :: DocStore -> FieldIndex -> FieldStats -> BS.ByteString
-encodeState docStore fieldIndex metadata =
+encodeState :: DocStore -> FieldIndex -> FieldStats -> FieldTrigrams -> BS.ByteString
+encodeState docStore fieldIndex metadata fieldTrigrams =
   let
     fieldNames = Map.keys fieldIndex
     fieldNameToId = Map.fromList $ zip fieldNames [0 :: Word16 ..]
@@ -128,13 +140,14 @@ encodeState docStore fieldIndex metadata =
     documentBlocks = encodeDocs docStore
     documentBytes = BS.concat $ snd <$> documentBlocks
     metaBytes = encodeMetadata fieldNameToId metadata
+    trigramBytes = encodeTrigrams fieldNameToId fieldTrigrams
     docSparseBytes = encodeDocSparse documentBlocks
 
     termSparseOffset = fromIntegral $ headerOffset + BS.length tokenBlocksBytes
     storedFieldsOffset = termSparseOffset + fromIntegral (BS.length sparseIndexBytes)
     docMetadataOffset = storedFieldsOffset + fromIntegral (BS.length documentBytes)
-    docSparseOffset = docMetadataOffset + fromIntegral (BS.length metaBytes)
-    metaSparseOffset = docSparseOffset + fromIntegral (BS.length docSparseBytes)
+    trigramOffset = docMetadataOffset + fromIntegral (BS.length metaBytes)
+    docSparseOffset = trigramOffset + fromIntegral (BS.length trigramBytes)
 
     finalHeader =
       C.runPut $
@@ -142,9 +155,9 @@ encodeState docStore fieldIndex metadata =
           nonOffsetHeader
             { termSparseOffset
             , docSparseOffset
-            , metaSparseOffset
             , storedFieldsOffset
             , docMetadataOffset
+            , trigramOffset
             }
    in
     finalHeader
@@ -152,6 +165,7 @@ encodeState docStore fieldIndex metadata =
       <> sparseIndexBytes
       <> documentBytes
       <> metaBytes
+      <> trigramBytes
       <> docSparseBytes
 
 emptyHeader :: [FieldName] -> Int -> Header
@@ -163,9 +177,9 @@ emptyHeader fieldNames docCount =
     , fieldNames
     , termSparseOffset = 0
     , docSparseOffset = 0
-    , metaSparseOffset = 0
     , storedFieldsOffset = 0
     , docMetadataOffset = 0
+    , trigramOffset = 0
     }
 
 encodeTokenBlocks ::
@@ -191,6 +205,18 @@ encodeTokenBlocks fieldNameToId fieldIndex =
         (fromIntegral <$> relativeOffsets)
    in
     (BS.concat tokenBlocks, sparseIndex)
+
+encodeTrigrams ::
+  Map.Map FieldName Word16 -> FieldTrigrams -> BS.ByteString
+encodeTrigrams fieldNameToId fieldTrigrams =
+  let
+    entries = do
+      (fieldName, trigrams) <- Map.toList fieldTrigrams
+      (trigram, tokens) <- Map.toList trigrams
+      pure
+        TrigramEntry{fieldId = fieldNameToId Map.! fieldName, trigram, tokens = S.toList tokens}
+   in
+    C.runPut $ traverse_ putTrigramEntry entries
 
 encodeDocs :: DocStore -> [(DocId, BS.ByteString)]
 encodeDocs docStore =
@@ -241,7 +267,9 @@ getMany getOne = do
 
 decodeSnapshot ::
   BS.ByteString ->
-  Either String (Header, DocStore, FieldIndex, SparseIndex, DocSparseIndex, FieldStats)
+  Either
+    String
+    (Header, DocStore, FieldIndex, SparseIndex, DocSparseIndex, FieldStats, FieldTrigrams)
 decodeSnapshot = C.runGet $ do
   header <- getHeader
   headerSize <- C.bytesRead
@@ -251,10 +279,11 @@ decodeSnapshot = C.runGet $ do
   let sparseIndexSize = fromIntegral header.storedFieldsOffset - headerAndEntrySize
   sparseEntries <- C.isolate sparseIndexSize (getMany getSparseIndexEntry)
   docs <- replicateM (fromIntegral header.docCount) getDocument
-  let metaEntriesSize = fromIntegral (header.docSparseOffset - header.docMetadataOffset)
+  let metaEntriesSize = fromIntegral (header.trigramOffset - header.docMetadataOffset)
   meta <- C.isolate metaEntriesSize (getMany getFieldMeta)
-  let sparseDocIndexSize = fromIntegral (header.metaSparseOffset - header.docSparseOffset)
-  sparseDocEntries <- C.isolate sparseDocIndexSize (getMany getDocSparseEntry)
+  let trigramIndexSize = fromIntegral (header.docSparseOffset - header.trigramOffset)
+  trigrams <- C.isolate trigramIndexSize (getMany getTrigramEntry)
+  sparseDocEntries <- getMany getDocSparseEntry
   pure
     ( header
     , buildDocStore docs
@@ -266,6 +295,7 @@ decodeSnapshot = C.runGet $ do
         sparseEntries
     , buildDocSparseIndex header sparseDocEntries
     , buildFieldStats header meta
+    , buildFieldTrigrams header trigrams
     )
 
 buildDocStore :: [Document] -> DocStore
@@ -295,6 +325,19 @@ buildFieldStats header meta =
             (Map.singleton e.docId (DocFieldStats $ fromIntegral e.tokenCount))
       )
         <$> meta
+    )
+
+buildFieldTrigrams :: Header -> [TrigramEntry] -> FieldTrigrams
+buildFieldTrigrams header trigrams =
+  foldl'
+    mergeTrigrams
+    Map.empty
+    ( ( \e ->
+          Map.singleton
+            (header.fieldNames !! fromIntegral e.fieldId)
+            (Map.singleton e.trigram (S.fromList e.tokens))
+      )
+        <$> trigrams
     )
 
 buildSparseIndex :: Header -> Word64 -> Word64 -> [SparseIndexEntry] -> SparseIndex
@@ -353,9 +396,9 @@ data Header = Header
   , fieldNames :: [FieldName]
   , termSparseOffset :: Word64
   , docSparseOffset :: Word64
-  , metaSparseOffset :: Word64
   , storedFieldsOffset :: Word64
   , docMetadataOffset :: Word64
+  , trigramOffset :: Word64
   }
   deriving stock (Eq, Show)
 
@@ -368,9 +411,9 @@ putHeader
     , fieldNames
     , termSparseOffset
     , docSparseOffset
-    , metaSparseOffset
     , storedFieldsOffset
     , docMetadataOffset
+    , trigramOffset
     } = do
     C.putByteString "KENG"
     putVarint (fromIntegral version)
@@ -382,9 +425,9 @@ putHeader
     -- so varint here would create a chicken-and-egg problem in encodeState.
     C.putWord64be termSparseOffset
     C.putWord64be docSparseOffset
-    C.putWord64be metaSparseOffset
     C.putWord64be storedFieldsOffset
     C.putWord64be docMetadataOffset
+    C.putWord64be trigramOffset
     where
       putFieldName :: FieldName -> C.Put
       putFieldName fn = do
@@ -403,9 +446,9 @@ getHeader = do
   fieldNames <- replicateM (fromIntegral fieldCount) getFieldName
   termSparseOffset <- C.getWord64be
   docSparseOffset <- C.getWord64be
-  metaSparseOffset <- C.getWord64be
   storedFieldsOffset <- C.getWord64be
   docMetadataOffset <- C.getWord64be
+  trigramOffset <- C.getWord64be
   pure
     Header
       { version
@@ -414,9 +457,9 @@ getHeader = do
       , fieldNames
       , termSparseOffset
       , docSparseOffset
-      , metaSparseOffset
       , storedFieldsOffset
       , docMetadataOffset
+      , trigramOffset
       }
   where
     getFieldName :: C.Get FieldName
@@ -424,6 +467,43 @@ getHeader = do
       fieldNameLength <- getVarint
       fnNameBytes <- C.getBytes (fromIntegral fieldNameLength)
       refineFail $ decodeUtf8 fnNameBytes
+
+data TrigramEntry = TrigramEntry
+  { fieldId :: Word16
+  , trigram :: Trigram
+  , tokens :: [Token]
+  }
+  deriving stock (Eq, Show)
+
+putTrigramEntry :: TrigramEntry -> C.Put
+putTrigramEntry TrigramEntry{fieldId, trigram, tokens} = do
+  putVarint (fromIntegral fieldId)
+  let trigramBytes = encodeUtf8 $ unrefine trigram
+  putVarint (fromIntegral $ BS.length trigramBytes)
+  C.putByteString trigramBytes
+  putVarint (fromIntegral $ length tokens)
+  traverse_ putToken tokens
+  where
+    putToken :: Token -> C.Put
+    putToken (Token tkn) = do
+      let tknBytes = encodeUtf8 tkn
+      putVarint (fromIntegral $ BS.length tknBytes)
+      C.putByteString tknBytes
+
+getTrigramEntry :: C.Get TrigramEntry
+getTrigramEntry = do
+  fieldId <- fromIntegral <$> getVarint
+  trigramLength <- getVarint
+  (trigram :: Trigram) <-
+    refineFail . decodeUtf8 =<< C.getBytes (fromIntegral trigramLength)
+  tokenCount <- getVarint
+  tokens <- replicateM (fromIntegral tokenCount) getToken
+  pure TrigramEntry{fieldId, trigram, tokens}
+  where
+    getToken :: C.Get Token
+    getToken = do
+      tokenLength <- getVarint
+      Token . decodeUtf8 <$> C.getBytes (fromIntegral tokenLength)
 
 data TokenEntry = TokenEntry
   { fieldId :: Word16
